@@ -1,0 +1,2894 @@
+Option Compare Database
+Option Explicit
+
+Dim ccTransType, ccAcctNum, ccExpDate, ccAmt, ccAddr, ccZip, ccAuthAmt, ccOrder
+Dim ccFirstName, ccLastName, ccEmail, ccCustomer, ccSecurityKey
+Dim ccCompany, ccCity, ccState, ccCountry, ccPhone, ccFax, ccName
+
+Global ccResponse, ccResult, ccPNREF, ccRESPMSG, ccAuthCode, ccAVSAddr, ccAVSZip, ccAVSCode, ccOrigID, ccCVV2
+Global ccTransDate, ccSettleBatch, ccBadAVS, ccBadCVV2, ccOrigTransType
+
+Private Type GUID
+    Data1 As Long
+    Data2 As Integer
+    Data3 As Integer
+    Data4(7) As Byte
+End Type
+
+Private Declare Function CoCreateGuid Lib "OLE32.DLL" (pGuid As GUID) As Long
+
+Public Function CleanCharacters(x)
+
+    Dim y$, z%, str$, i&
+    
+    CleanCharacters = ""
+    str = ""
+    
+    If x & "" = "" Then Exit Function
+    
+    For i = 1 To Len(x)
+        y = Mid$(x, i, 1)
+        z = Asc(y)
+        If (z >= 0 And z <= 32) Or (z >= 128 And z <= 187) Or z = 191 Or z = 34 Or z = 39 Or z = 60 Or z = 62 Then
+            y = " "
+        ElseIf z = 38 Then
+            y = "and"
+        ElseIf z = 188 Then
+            y = "1/4"
+        ElseIf z = 189 Then
+            y = "1/2"
+        ElseIf z = 190 Then
+            y = "3/4"
+        ElseIf z >= 192 And z <= 198 Then
+            y = "A"
+        ElseIf z >= 199 And z <= 203 Then
+            y = "E"
+        ElseIf z >= 204 And z <= 207 Then
+            y = "I"
+        ElseIf z = 208 Then
+            y = "D"
+        ElseIf z = 209 Then
+            y = "N"
+        ElseIf (z >= 210 And z <= 214) Or z = 216 Then
+            y = "O"
+        ElseIf z = 215 Then
+            y = "*"
+        ElseIf z >= 217 And z <= 220 Then
+            y = "U"
+        ElseIf z = 221 Then
+            y = "Y"
+        ElseIf z = 222 Or z = 254 Then
+            y = "p"
+        ElseIf z = 223 Then
+            y = "ss"
+        ElseIf z >= 224 And z <= 230 Then
+            y = "a"
+        ElseIf z >= 231 And z <= 235 Then
+            y = "e"
+        ElseIf z >= 236 And z <= 239 Then
+            y = "i"
+        ElseIf (z >= 242 And z <= 246) Or z = 240 Or z = 248 Then
+            y = "o"
+        ElseIf z = 241 Then
+            y = "n"
+        ElseIf z = 247 Then
+            y = " / "
+        ElseIf z >= 249 And z <= 252 Then
+            y = "u"
+        ElseIf z = 253 Or z = 255 Then
+            y = "y"
+        End If
+        
+        str = str & y
+        
+    Next
+    
+    CleanCharacters = str
+    
+End Function
+Function NoAmpersands(what)
+
+    'replace any ampersands and plus signs with spaces; replace question marks with underscores
+    
+    Dim x$, i%, y$
+    
+    x = ""
+    If what & "" > "" Then
+        For i = 1 To Len(what)
+            y = Mid$(what, i, 1)
+            Select Case y
+                Case "&", "+"
+                    If Right$(x, 1) = " " Then x = Left$(x, Len(x) - 1)
+                    x = x & " and "
+                    If Mid$(what, i + 1, 1) = " " Then
+                        i = i + 1
+                        If i > Len(what) Then Exit For
+                    End If
+                Case "?"
+                    x = x & "_"
+                Case Else
+                    x = x & y
+            End Select
+        Next
+    End If
+    
+    NoAmpersands = x
+    
+End Function
+
+Public Sub SkipJackParse(Which)
+    
+    Dim x, respstr$, headstr$, Label$, Value$
+    Dim i%, j%, k%, OK%, cnt%, OrigResponse$, strErr$
+    
+    OrigResponse = ccResponse
+        
+    If Which = "Auth" Then  'Authorization Response
+        '1 - "AUTHCODE" response will be authcode or "EMPTY"
+        '2 - "szSerialNumber"
+        '3 - "szTransactionAmount"
+        '4 - "szAuthorizationDeclinedMessage"
+        '5 - "szAVSResponseCode"
+        '6 - "szAVSResponseMessage"
+        '7 - "szOrderNumber"
+        '8 - "szAuthorizationResponseCode"
+        '9 - "szIsApproved"
+        '10 - "szCVV2ResponseCode"
+        '11 - "szCVV2ResponseMessage"
+        '12 - "szReturnCode"
+        '13 - "szTransactionFileName"
+    
+        'Skipjack Response Lines for decline (first line label, second line value):
+        '"AUTHCODE","szSerialNumber","szTransactionAmount","szAuthorizationDeclinedMessage","szAVSResponseCode","szAVSResponseMessage","szOrderNumber","szAuthorizationResponseCode","szIsApproved","szCVV2ResponseCode","szCVV2ResponseMessage","szReturnCode","szTransactionFileName"
+        '"EMPTY","000260090958","100","CVV2 Value supplied is invalid","Y","","","","0","N","No Match","1","9802851285240.DEV"
+        'Skipjack Response Lines for Approve
+        '"AUTHCODE","szSerialNumber","szTransactionAmount","szAuthorizationDeclinedMessage","szAVSResponseCode","szAVSResponseMessage","szOrderNumber","szAuthorizationResponseCode","szIsApproved","szCVV2ResponseCode","szCVV2ResponseMessage","szReturnCode","szTransactionFileName"
+        '"VITAL1","000260090958","100","","Y","Card authorized, exact address match with 5 digit zip code.","","VITAL1","1","M","Match","1","9802851287039.DEV"
+        
+        ccBadCVV2 = False
+        ccBadAVS = False
+
+        x = InStr(ccResponse, vbCrLf)
+        If x > 0 Then
+            headstr = Left$(ccResponse, x - 1)
+            respstr = Mid$(ccResponse, x + 2)
+            cnt = 1
+            Do
+                ccResponse = headstr
+                x = CCCommaQParse(cnt)
+                Label = x
+                ccResponse = respstr
+                x = CCCommaQParse(cnt)
+                Value = x
+                Select Case Label
+                    Case "AUTHCODE": ccAuthCode = Value
+                    Case "szAuthorizationDeclinedMessage": ccRESPMSG = Value
+                    Case "szAVSResponseCode": ccAVSCode = Value
+                    Case "szAuthorizationResponseCode"
+                    Case "szIsApproved": ccResult = Value
+                    Case "szCVV2ResponseCode": ccCVV2 = Value
+                    Case "szCVV2ResponseMessage"
+                    Case "szReturnCode": strErr = Value
+                        Select Case strErr  '7/7/03:KBS
+                            Case -35: strErr = "Error invalid credit card number"
+                            Case -37: strErr = "Error failed communication"
+                            Case -39: strErr = "Error length serial number"
+                            Case -51: strErr = "Error length zip code"
+                            Case -52: strErr = "Error length shipto zip code"
+                            Case -53: strErr = "Error length expiration date"
+                            Case -54: strErr = "Error length account number date"
+                            Case -55: strErr = "Error length street address"
+                            Case -56: strErr = "Error length shipto street address"
+                            Case -57: strErr = "Error length transaction amount"
+                            Case -58: strErr = "Error length name"
+                            Case -59: strErr = "Error length location"
+                            Case -60: strErr = "Error length state"
+                            Case -61: strErr = "Error length shipto state"
+                            Case -62: strErr = "Error length order string"
+                            Case -64: strErr = "Error invalid phone number"
+                            Case -65: strErr = "Error empty name"
+                            Case -66: strErr = "Error empty email"
+                            Case -67: strErr = "Error empty street address"
+                            Case -68: strErr = "Error empty city"
+                            Case -69: strErr = "Error empty state"
+                            Case -79: strErr = "Error length customer name"
+                            Case -80: strErr = "Error length shipto customer name"
+                            Case -81: strErr = "Error length customer location"
+                            Case -82: strErr = "Error length customer state"
+                            Case -83: strErr = "Error length shipto phone"
+                            Case -84: strErr = "Pos error duplicate ordernumber"
+                            Case -91: strErr = "Pos_error_CVV2"
+                            Case -92: strErr = "Pos_error_Error_Approval_Code"
+                            Case -93: strErr = "Pos_error_Blind_Credits_Not_Allowed"
+                            Case -94: strErr = "Pos_error_Blind_Credits_Failed"
+                            Case -95: strErr = "Pos_error_Voice_Authorizations_Not_Allowed"
+                        End Select
+                    Case "szTransactionFileName": ccPNREF = Value: ccOrigID = Value
+                End Select
+                cnt = cnt + 1
+            Loop Until Label = ""
+            '7/7/03:KBS
+            'If ccAuthCode = "EMPTY" And ccResult = "" Then ccResult = 0: ccAuthCode = "": ccRESPMSG = "ERROR: " & strErr
+            If ccAuthCode = "EMPTY" And (ccResult = "" Or ccResult = "0") Then
+                ccResult = 0
+                ccAuthCode = ""
+                If strErr <> "1" Then
+                    ccRESPMSG = ccRESPMSG & ": " & strErr
+                Else
+                    ccRESPMSG = ccRESPMSG & " Failed."
+                End If
+            End If
+            
+            If ccResult = 0 And ccCVV2 = "N" Then ccBadCVV2 = True
+            If ccResult = 0 And (ccAVSCode <> "X" And ccAVSCode <> "Y" And ccAVSCode <> "D") Then ccBadAVS = True
+        End If
+    Else    'TransactionChangeStatusRequest response
+        'Example of ChangeStatusRequest response
+        '"000260090958","1.0000","SETTLE","SUCCESSFUL","Valid","","9802851286997.DEV"
+        '1 - serial Number : The merchant (HTML) serial number.
+        '2 - Amount : The transaction amount, after status change.
+        '3 - Desired Status : This is the status which the associated transaction should be changed.
+        '4 - Status Response : The response text of the status change.  The valid entries are: {“SUCCESSFUL”, “UNSUCCESSFUL”, “NOTALLOWED”}.
+        '5 - Status Response Message : Detailed message defining the reason for the response.
+        '6 - Order Number : The transaction order number, passed during the original authorization.
+        '7 - Transaction ID : This is the SkipjackIC assigned transaction ID.
+        x = InStr(ccResponse, vbCrLf)
+        If x > 0 Then ccResponse = Mid$(ccResponse, x + 2)
+        x = InStr(ccResponse, vbCrLf)
+        If x > 0 Then ccResponse = Left$(ccResponse, Len(ccResponse) - 2)   'Trim any vbcrlf at end
+        If InStr(ccResponse, ",") = 0 Then ccRESPMSG = ccResponse: ccResult = 0: Exit Sub
+        x = CCCommaQParse(4)
+        If x = "SUCCESSFUL" Then ccResult = 1 Else ccResult = 0
+        x = CCCommaQParse(5)
+        ccRESPMSG = x
+        x = CCCommaQParse(7)
+        ccPNREF = x
+    End If
+    
+    ccResponse = OrigResponse
+    Exit Sub
+
+End Sub
+
+Public Function SkipJackSend(Silent)
+
+    '7/2/02: changed AuthNet version to 3.1; added CVV2 support
+    '9/18/02: need FN,LN,Company,City,State,Country,Phone,Fax & Email; include with all transactions
+    
+    Dim Server$, Page$, Data$, URL$, y$, z$, Port
+    Dim x, f%, q$, SendPath$, ReturnPath$, OK%, ftype$, TestMode%, Key$, DevKey$, DoSC%
+    
+    q = Chr$(34)
+    
+    Key = GetParm("SkipjackSerialNumber")
+    '4/17/03
+    'DevKey = GetParm("SETISJDevKey")
+    DevKey = GetParm("SkipjackDevKey")
+    TestMode = GetParm("SkipjackTestMode")
+
+RunSettle:  'for a sale this routine needs to be run twice. First for the pre-auth, then for the Settlment(capture)
+    
+    SkipJackSend = False
+    DoSC = False
+    
+    If Key = "" Then
+        Beep
+        MsgBox "Skipjack parameters not set - can't send request!"
+        SkipJackSend = "ProcessError"
+        Exit Function
+    End If
+
+    Select Case ccTransType
+        Case "S": x = "AUTHORIZE": z = "Sale"                       'Sale: must first run auth then settle
+        Case "C": x = "CREDIT": z = "Credit": DoSC = True           'Credit
+        Case "A": x = "AUTHORIZE": z = "Pre-Authorization"          'Auth
+        Case "D": x = "SETTLE": z = "Delayed Capture": DoSC = True  'Delayed_Capture of regular auth
+        Case "V": x = "DELETE": z = "Void": DoSC = True                       'Void
+        Case Else: Stop
+    End Select
+    
+    If ccTransType = "D" Or ccTransType = "C" Or ccTransType = "V" Then         'Delayed Capture/Credit/Void
+        Data = "szSerialNumber=" & Key
+        Data = Data & "&szDeveloperSerialNumber=" & DevKey
+        Data = Data & "&szAmount=" & Format$(ccAmt, "0.00")
+        Data = Data & "&szTransactionId=" & ccOrigID
+        Data = Data & "&szDesiredStatus=" & x
+        Data = Data & "&szForceSettlement=" & IIf(ccSettleBatch, 1, 0)
+    Else                                                                        'Auth or Sale
+        'do the auth stuff
+        Data = "Serialnumber=" & Key
+        Data = Data & "&TransactionAmount=" & Format$(ccAmt, "0.00")
+        ftype = "T"
+        x = ccName: y = "sjname": GoSub FormatData
+        x = ccAddr: y = "Streetaddress": GoSub FormatData
+        x = ccCity: y = "City": GoSub FormatData
+        x = ccState: y = "State": GoSub FormatData
+        x = ccZip: y = "Zipcode": GoSub FormatData
+        x = ccCountry: y = "Country": GoSub FormatData
+        Data = Data & "&Accountnumber=" & ccAcctNum
+        Data = Data & "&Month=" & Left$(ccExpDate, 2)
+        Data = Data & "&Year=" & Right$(ccExpDate, 2)
+        Data = Data & "&Comment=" & z & ", Order #" & ccOrder
+        Data = Data & "&OrderString=SETIOM~StoneEdgeOrderManagerTransaction~0.00~1~N~||"
+        ftype = "E"
+        x = ccEmail: y = "Email": GoSub FormatData
+        ftype = "P"
+        ccPhone = JustNumerals(ccPhone)
+        x = ccPhone: y = "Shiptophone": GoSub FormatData
+        ccFax = JustNumerals(ccFax)
+        x = ccFax: y = "Fax": GoSub FormatData
+        If ccCVV2 > "" Then Data = Data & "&Cvv2=" & ccCVV2
+        
+    End If
+    If DoSC Then x = "?SJAPI_TransactionChangeStatusRequest" Else x = "?AuthorizeAPI"
+    If TestMode Then y = "developer" Else y = "www"
+
+    URL$ = "https://" & y & ".skipjackic.com/scripts/evolvcc.dll" & x
+    
+    SplitAddr URL, Server, Page, Port
+    
+    If Not Silent Then SysCmd acSysCmdSetStatus, "Sending request to Skipjack ..."
+    x = HTMLPost(Server, Page, Data, True, Silent, , , "SkipJack Send")
+    If Not Silent Then SysCmd acSysCmdClearStatus
+    
+    '7/30/02:
+    If Not DoSC Then ccCVV2 = ""
+    
+    ccResponse = x
+    
+    If DoSC Then x = "Change" Else x = "Auth"
+    SkipJackParse x
+    If val(ccResult) = 1 Then
+        If ccTransType = "S" Then
+            'Run the settle
+            ccTransType = "D"
+            GoTo RunSettle
+        End If
+        SkipJackSend = True
+    ElseIf y = "NoNET" Then
+        SkipJackSend = y
+    End If
+            
+    Exit Function
+    
+FormatData:
+    '11/8/02
+    If Not IsMissing(x) Then
+        If x = "" Then
+            Select Case ftype
+                Case "P": x = "000 000 0000"
+                '9/20/02
+                Case "E": x = GetParm("WellsFargoDefaultEmail") & ""
+                Case Else: x = "n/a"
+            End Select
+        End If
+        Data = Data & "&" & y & "=" & URLEncode(x)
+    End If
+    Return
+    
+End Function
+
+Public Sub USAEPayParse()
+    
+    'USAEPAY Response string as follows:
+    'UMversion=2.3&UMstatus=Error&UMauthCode=000000&UMerror=Unable%20to%20verify%20source&UMresult=E&UMfiller=filled
+    'UMversion=2.3&UMstatus=Approved&UMauthCode=OK0423&UMrefNum=488871&UMavsResult=Address%3A%20Match%20%26%205%20Digit%20Zip%3A%20Match&UMcvv2Result=n%2Fa&UMresult=A&UMerror=Approved&UMfiller=filled
+    ccBadAVS = False
+    ccBadCVV2 = False
+    
+    ccResult = CCParse("UMStatus")
+    ccPNREF = CCParse("UMrefNum")
+    ccRESPMSG = URLDecode(CCParse("UMError"))
+    ccAuthCode = CCParse("UMauthcode")
+    ccAVSCode = URLDecode(CCParse("UMavsResult"))
+    If Len(ccAVSCode) > 2 Then BuildAVS ("USAEPay")
+    ccCVV2 = URLDecode(CCParse("UMcvv2Result"))
+        
+    '7/7/03:KBS
+    If ccResult <> "Approved" And ccAVSCode & "" > "" And ccAVSCode <> "YY" Then ccBadAVS = True
+    If ccResult <> "Approved" And ccCVV2 & "" > "" And ccCVV2 <> "M" Then ccBadCVV2 = True
+    
+End Sub
+
+Public Function USAEPaySend(Silent)
+    
+    Dim Server$, Page$, Data$, URL$, y$, z$, Port
+    Dim x, f%, q$, SendPath$, ReturnPath$, OK%, ftype$, TestMode%, Key$, Password$
+    
+    q = Chr$(34)
+
+    ccOrigID = JustNumerals(ccOrigID)
+    
+    Key = GetParm("USAEPayKey")
+    TestMode = GetParm("USAEPayTestMode")
+    
+    USAEPaySend = False
+    
+    If Key = "" Then
+        Beep
+        MsgBox "USAEPay parameter not set - can't send request!"
+        USAEPaySend = "ProcessError"
+        Exit Function
+    End If
+    
+    Data = "UMkey=" & Key
+    If TestMode Then Data = Data & "&UMtestmode=1"
+    Data = Data & "&UMamount=" & Format$(ccAmt, "0.00")
+    
+    Select Case ccTransType
+        Case "S": x = "sale": z = "Charge"                              'Sale
+        Case "C": x = "credit": z = "Credit"                            'Credit
+        Case "A": x = "preauth": z = "Pre-Authorization"                'Auth
+        
+        '8/14/03
+        'Case "D": x = "postauth": z = "Delayed Capture"
+        Case "D": x = "capture": z = "Delayed Capture"                 'Delayed_Capture of regular auth
+        
+        Case "V": x = "void": z = "Void"                                'Void
+        Case Else: Stop
+    End Select
+    Data = Data & "&UMcommand=" & x
+    
+    If ccTransType = "D" Or ccTransType = "C" Then              'Capture or Credit
+        Data = Data & "&UMauthCode=" & ccAuthCode
+        Data = Data & "&UMcard=" & ccAcctNum
+        Data = Data & "&UMexpir=" & ccExpDate
+        Data = Data & "&UMrefNum=" & ccOrigID
+    ElseIf ccTransType = "V" Then                                'Void
+        Data = Data & "&UMauthCode=" & ccAuthCode
+        Data = Data & "&UMcard=" & ccAcctNum
+        Data = Data & "&UMrefNum=" & ccOrigID
+        'Data = Data & "&UMexpir=0000"
+    Else                                                        'Sale or Auth
+        Data = Data & "&UMcard=" & ccAcctNum
+        Data = Data & "&UMexpir=" & ccExpDate
+        x = GetParm("USAEPaySendEmail")
+        If x = True And Not IsMissing(ccEmail) Then x = "Yes" Else x = "No"
+        Data = Data & "&UMcustreceipt=" & x
+        If ccCVV2 > "" Then Data = Data & "&UMcvv2=" & ccCVV2
+    End If
+    
+    Data = Data & "&UMdescription=" & URLEncode(z & ", Order #" & ccOrder)
+    Data = Data & "&UMinvoice=" & ccOrder
+    
+    ftype = "T"
+    
+    x = ccCustomer: y = "UMcustid": GoSub FormatData
+    x = ccFirstName: y = "UMbillfname": GoSub FormatData
+    x = ccLastName: y = "UMbilllname": GoSub FormatData
+    x = ccCompany: y = "UMbillCompany": GoSub FormatData
+    x = ccAddr: y = "UMbillstreet": GoSub FormatData
+    x = ccAddr: y = "UMstreet": GoSub FormatData
+    x = ccCity: y = "UMbillcity": GoSub FormatData
+    x = ccState: y = "UMbillstate": GoSub FormatData
+    x = ccZip: y = "UMbillzip": GoSub FormatData
+    x = ccZip: y = "UMzip": GoSub FormatData
+    x = ccCountry: y = "UMbillcountry": GoSub FormatData
+    x = ccName: y = "UMname": GoSub FormatData
+    
+    ftype = "E"
+    x = ccEmail: y = "UMcustemail": GoSub FormatData
+    
+    ftype = "P"
+    x = ccPhone: y = "UMbillphone": GoSub FormatData
+    x = ccFax: y = "UMfax": GoSub FormatData
+
+    URL$ = "https://www.usaepay.com/gate.php"
+    SplitAddr URL, Server, Page, Port
+    
+    If Not Silent Then SysCmd acSysCmdSetStatus, "Sending request to USAEPay ..."
+    x = HTMLPost(Server, Page, Data, True, Silent, , , "USAePay Send")
+    If Not Silent Then SysCmd acSysCmdClearStatus
+    
+    '7/30/02:
+    ccCVV2 = ""
+    
+    ccResponse = x
+    USAEPayParse
+    If ccResult = "Approved" Then
+        USAEPaySend = True
+    ElseIf y = "NoNET" Then
+        USAEPaySend = y
+    End If
+            
+    Exit Function
+    
+FormatData:
+    '11/8/02
+    If Not IsMissing(x) Then
+        If x = "" Then
+            Select Case ftype
+                Case "P": x = "000 000 0000"
+            End Select
+        End If
+        If ftype = "P" Or ftype = "T" Then x = URLEncode(x)
+        Data = Data & "&" & y & "=" & x
+    End If
+    Return
+
+End Function
+
+
+
+
+Public Function EchoSend(Silent)
+    
+    Dim Server$, Page$, Data$, URL$, y$, z$, Port
+    Dim x, f%, q$, SendPath$, ReturnPath$, OK%, ftype$, TestMode%, User$, Password$, BillPhone$
+    
+    q = Chr$(34)
+
+    ccOrigID = JustNumerals(ccOrigID)
+    
+    User = GetParm("EchoID")
+    Password = GetParm("EchoPIN")
+    TestMode = GetParm("EchoTestMode")
+
+    EchoSend = False
+    
+    If User = "" Or Password = "" Then
+        Beep
+        MsgBox "EchoOnline parameters not set - can't send request!"
+        EchoSend = "ProcessError"
+        Exit Function
+    End If
+    If ccPhone & "" = "" Then
+        Beep
+        MsgBox "EchoOnline requires a billing phone number to process the transaction - can't send request!"
+        EchoSend = "ProcessError"
+        Exit Function
+    End If
+    
+    Data = "merchant_echo_id=" & User
+    Data = Data & "&merchant_pin=" & Password
+    If TestMode Then x = "&debug=C" Else x = "&debug=F"                 'C-TestMode,F-Live,T-Live with debug data returned
+    Data = Data & x
+    Data = Data & "&order_type=S"
+    Data = Data & "&counter=" & Nz(DMax("AutoNumber", "Transactions"), 0) + 1
+    Data = Data & "&grand_total=" & Format$(ccAmt, "0.00")
+    
+    Select Case ccTransType
+        Case "S": x = "EV": z = "Charge"                              'Sale
+        Case "C": x = "CR": z = "Credit"                            'Credit
+        Case "A": x = "AV": z = "Pre-Authorization"                'Auth
+        Case "D": x = "DS": z = "Delayed Capture"                 'Delayed_Capture of regular auth
+        Case "V": x = " ": z = "Void"                                'Void
+        Case Else: Stop
+    End Select
+    Data = Data & "&transaction_type=" & x
+    
+    If ccTransType = "D" Then                                   'Capture
+        Data = Data & "&authorization=" & ccAuthCode
+    ElseIf ccTransType = "C" Then                               'Credit
+        Data = Data & "&original_reference=" & ccOrigID
+        Data = Data & "&original_amount=" & Format$(ccAmt, "0.00")
+        Data = Data & "&original_trandate_mm=" & Format(ccTransDate, "mm")
+        Data = Data & "&original_trandate_dd=" & Format(ccTransDate, "dd")
+        Data = Data & "&original_trandate_yyyy=" & Format(ccTransDate, "yyyy")
+    Else                                                        'Sale or Auth
+        If ccCVV2 > "" Then Data = Data & "&cnp_security=" & ccCVV2
+    End If
+    Data = Data & "&cc_number=" & ccAcctNum
+    Data = Data & "&ccexp_month=" & Left$(ccExpDate, 2)
+    Data = Data & "&ccexp_year=" & Right$(ccExpDate, 2)
+    Data = Data & "&merchant_trace_nbr=" & ccOrder
+    
+    ftype = "T"
+    
+    x = ccFirstName: y = "billing_first_name": GoSub FormatData
+    x = ccLastName: y = "billing_last_name": GoSub FormatData
+    x = ccCompany: y = "billing_company_name": GoSub FormatData
+    x = ccAddr: y = "billing_address1": GoSub FormatData
+    x = ccCity: y = "billing_city": GoSub FormatData
+    x = ccState: y = "billing_state": GoSub FormatData
+    x = ccZip: y = "billng_zip": GoSub FormatData
+    x = ccCountry: y = "billing_country": GoSub FormatData
+    
+    ftype = "E"
+    x = ccEmail: y = "billing_email": GoSub FormatData
+    
+    ftype = "P"
+    x = ccPhone: y = "billing_phone": GoSub FormatData
+    x = ccFax: y = "billing_fax": GoSub FormatData
+
+    URL$ = "https://wwws.echo-inc.com/scripts/INR200.EXE"
+    SplitAddr URL, Server, Page, Port
+    
+    If Not Silent Then SysCmd acSysCmdSetStatus, "Sending request to Echo-Inc..."
+    x = HTMLPost(Server, Page, Data, True, Silent, , , "Echo Send")
+    If Not Silent Then SysCmd acSysCmdClearStatus
+    
+    '7/30/02:
+    ccCVV2 = ""
+    
+    ccResponse = x
+    EchoParse
+    If ccResult = "G" Then
+        EchoSend = True
+    ElseIf y = "NoNET" Then
+        EchoSend = y
+    End If
+            
+    Exit Function
+    
+FormatData:
+    '11/8/02
+    If Not IsMissing(x) Then
+        If x = "" Then
+            Select Case ftype
+                Case "P": x = "000 000 0000"
+            End Select
+        End If
+        If ftype = "P" Or ftype = "T" Then x = URLEncode(x)
+        Data = Data & "&" & y & "=" & x
+    End If
+    Return
+
+End Function
+
+Public Sub EchoParse()
+
+    Dim x, y$, z$
+    'EchoOnline Return String:
+        'DECLINED:
+        '<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+        '<html><head><title>ECHOnline Response</title></head>
+        '<body bgcolor="#FFFFFF">
+        '<!-- <ECHOTYPE1>DECLINED 51                 1.00VN</ECHOTYPE1> -->
+        '<ECHOTYPE2><P><font size=+1><b>Transaction declined</b></font><br><style><!-- a:hover{color:#0080FF} --></style><p><table border=0 cellpadding=0 cellspacing=0><tr><td><font size=+1><b>Authorization and Deposit with Address Verification&nbsp;&nbsp;</td></tr><tr><td><hr></td></tr><tr><td>The credit limit for this account has been exceeded.&nbsp;&nbsp;</td></tr><tr><td><hr></td></tr></table><p><b>Processed by Electronic Clearing House</b><P></ECHOTYPE2>
+        '<!-- <ECHOTYPE3><status>D</status><auth_code>0051</auth_code><decline_code>0051</decline_code><order_number>0006-0032020-08620</order_number><merchant_name>STONE EDGE TECH     TEST</merchant_name><tran_amount>1.00</tran_amount><tran_date>03/28/2003</tran_date><merchant_trace_nbr>1</merchant_trace_nbr><version>3.25.5</version></ECHOTYPE3> -->
+        '</BODY></HTML>
+        'APPROVED
+        
+        
+    y = XMLGetData(ccResponse, "ECHOTYPE2")
+    y = JustName(y)
+    ccResult = XMLGetData(ccResponse, "status")
+    Select Case ccResult
+        Case "G": x = "Approved "
+        Case "D": x = "Decline Code "
+        Case "C": x = "Cancelled "
+        Case "T": x = "Timeout Error "
+        Case "R": x = "Received "
+    End Select
+    z = XMLGetData(ccResponse, "decline_code")  '7/7/03:KBS
+    ccPNREF = XMLGetData(ccResponse, "echo_reference")
+    ccRESPMSG = y & vbCrLf & x & z
+    ccAuthCode = XMLGetData(ccResponse, "auth_code")
+    ccAVSCode = XMLGetData(ccResponse, "avs_result")
+    ccCVV2 = XMLGetData(ccResponse, "security_result")
+    
+    '7/7/03:KBS
+    ccBadAVS = False
+    ccBadCVV2 = False
+    If ccResult = "D" Then
+        'Check to see if bad AVS or CVV2
+        x = ccAVSCode
+        If (z >= 182020 And z <= 1814) Or (x <> "X" And x <> "Y" And x <> "D" And x <> "M") Then
+            ccBadAVS = True
+        ElseIf ccCVV2 = "N" Then
+            ccBadCVV2 = True
+        End If
+    End If
+    
+End Sub
+
+
+Function CCCommaQParse(ByVal Which)
+
+    'given a comma delimited string, return the requested element
+    'string to parse should be in CCResponse
+    '4/10/03:KBS Added this to parse CC strings with Quotes and commas in the data files
+    Dim i%, j%, k%, x$, OK%, q$, str$
+    
+    CCCommaQParse = ""
+    q = Chr(34)
+    
+    x = ccResponse & ""
+    If x > "" Then
+        If Which = 1 Then
+            i = InStr(x, q & "," & q)
+            If i > 0 Then
+                str = Left$(x, i - 1)
+                GoSub RemQuotes
+            Else
+                str = x
+                GoSub RemQuotes
+            End If
+        Else
+            j = 0: OK = True
+            For i = 1 To Which - 1
+                j = InStr(j + 1, x, q & "," & q)
+                If j = 0 Then OK = False: Exit For
+            Next
+            If OK Then
+                k = InStr(j + 1, x, q & "," & q)
+                If k = 0 Then
+                    str = Mid$(x, j + 3)
+                    GoSub RemQuotes
+                Else
+                    str = Mid$(x, j + 3, k - (j + 3))
+                    GoSub RemQuotes
+                End If
+            End If
+        End If
+    End If
+    Exit Function
+    
+RemQuotes:
+    If str & "" = "" Then
+        'nada
+    Else
+        Do Until Left$(str, 1) <> Chr$(34)
+            If Len(str) = 1 Then
+                str = ""
+            Else
+                str = Mid$(str, 2)
+            End If
+        Loop
+        Do Until Right$(str, 1) <> Chr$(34)
+            If Len(str) = 1 Then
+                str = ""
+            Else
+                str = Left$(str, Len(str) - 1)
+            End If
+        Loop
+        CCCommaQParse = str
+    End If
+    Return
+    
+End Function
+
+Sub UseCCInfo(f As Form, CarryForward As Currency, PrevOrderNum As Long)
+
+    'any earlier orders from this customer? if so, get credit card info from it:
+    
+    Dim x, y, z, rs As Recordset, i%, CheckCC%, CheckBal%, Balance As Currency, PrevDate As Date, x1, x2
+    Dim rs2 As Recordset, POS%, FirstOrder As Long, Mon%, Yr%
+    
+    If BreakMode Then
+        On Error GoTo 0
+    Else
+        On Error GoTo CCErr
+    End If
+    
+    If f.Name Like "POS*" Then
+        POS = True
+        FormVar2 = False
+    Else
+        POS = False
+    End If
+    
+    CarryForward = 0: PrevOrderNum = 0
+    CheckCC = GetParm("LookupCCInfo")
+    CheckBal = GetParm("AllowCarryForwards")
+    If Not CheckCC And Not CheckBal Then Exit Sub
+    
+    x = "SELECT * FROM OrdersQuery WHERE CustomerID=" & f.txtID
+    x = x & " ORDER BY OrderNumber DESC"
+    Set rs = MyDB.OpenRecordset(x, dbOpenSnapshot, dbSeeChanges)
+    If rs.RecordCount > 0 Then
+        If CheckCC Then
+            'got credit card info in that order?
+            With rs
+                .MoveFirst
+                x = !pay1 & ""
+                If x > "" And Not IsNull(!PayType) Then
+                    'compare names on two orders; confirm data, too:
+                    z = ![Name] & ""
+                    y = Trim$(f.txtFirstName & " " & f.txtLastName)
+                    If y = "" Then
+                        'if no name to compare - don't import CC info
+                    Else
+                        If z = y Then
+                            x = "Customer names match exactly." & cr2
+                        Else
+                            x = ""
+                            x = x & "Name on CURRENT order: " & y & cr
+                            x = x & "Name on EARLIER order: " & z & cr2
+                        End If
+                        x = x & "Data from earlier order:" & cr
+                        x = x & "     Payment Type  :  " & DLookup("[Method]", "PaymentMethods", "[ID]=" & !PayType) & cr
+                        
+                        '8/4/03
+                        'x = x & "     Account #   :  " & !pay1 & cr
+                        x = x & "     Account #   :  " & Last4(!pay1) & cr
+                        
+                        x = x & "     Expires     :  " & !pay4 & cr
+                        x = x & "     Bank        :  " & !pay3 & cr
+                        x = x & "     Name on card  :  " & !pay2 & cr2
+                        
+                        '2/11/03: test for expired cards
+                        x2 = JustNumerals(!pay4)
+                        If Len(x2) = 3 Or Len(x2) = 5 Then x2 = "0" & x2
+                        If Len(x2) = 4 Or Len(x2) = 6 Then
+                            Mon = Left$(x2, 2)
+                            If Len(x2) = 4 Then
+                                Yr = 2000 + Mid$(x2, 3)
+                            Else
+                                Yr = Mid$(x2, 3)
+                            End If
+                            If Mon > 0 And Mon < 13 Then
+                                If Yr > 1999 And Yr < Year(Date) + 10 Then
+                                    If Yr > Year(Date) Then
+                                        'ok
+                                    ElseIf Yr = Year(Date) And Mon >= Month(Date) Then
+                                        'ok
+                                    Else
+                                        x = x & "WARNING: CREDIT CARD MAY HAVE EXPIRED!!!" & cr2
+                                    End If
+                                End If
+                            End If
+                        End If
+                        
+                        x = "CONFIRM CREDIT CARD INFORMATION" & cr2 & x
+                        x = x & "Use this credit card information?"
+                        Beep
+                        x = MsgBox(x, vbYesNo + vbQuestion, "Confirm credit card information")
+                        FormVar3 = ""
+                        If x = vbYes Then
+                            '8/4/03: added Last4
+                            FormVar3 = !pay1
+                            If POS Then
+                                '7/14/03:KBS
+                                CRPayMeth = !PayType
+                                CRAcctNum = !pay1
+                                CRExpDate = !pay4
+                                FormVar2 = True
+                            Else
+                                f!txtPay1 = Last4(rs!pay1)
+                                f!txtPay2 = rs!pay2
+                                f!txtPay4 = rs!pay4
+                                f.cboPayType = !PayType
+                                f.cboPayType_AfterUpdate
+                            End If
+                        End If
+                    End If
+                End If
+            End With
+        End If
+        
+        'allow carry forward of balance from previous order?
+        If CheckBal Then
+            
+            ClearTable "TempOrders"
+            DoEvents
+            Set rs2 = MyDB.OpenRecordset("TempOrders")
+            With rs
+                'first, check latest order
+                .MoveFirst
+                i = 0: FirstOrder = 0
+                If Nz(!BalanceDue, 0) <> 0 Then
+                    i = 1
+                    FirstOrder = rs!OrderNumber
+                    GoSub Add2Temp
+                End If
+                If GetParm("CarryForwardType") = "All" Then
+                    'count other orders with balance <> 0
+                    .MoveNext
+                    Do Until .EOF
+                        If Nz(!BalanceDue, 0) <> 0 Then
+                            i = i + 1
+                            If FirstOrder = 0 Then FirstOrder = rs!OrderNumber
+                            GoSub Add2Temp
+                        End If
+                        .MoveNext
+                    Loop
+                End If
+            End With
+            
+            Formvar = Null
+            If i = 1 Then
+                rs.FindFirst "OrderNumber=" & FirstOrder
+                If rs.NoMatch Then Stop
+                Balance = Nz(rs!BalanceDue, 0)
+                x = "This customer's last order has a "
+                If Balance < 0 Then
+                    x = x & "CREDIT"
+                Else
+                    x = x & "BALANCE"
+                End If
+                x = x & " DUE of " & Format$(Balance, "currency")
+                x = x & "!" & cr2 & "Do you want to carry that amount forward to the new order?"
+                Beep
+                x = MsgBox(x, vbQuestion + vbYesNo)
+                If x = vbYes Then Formvar = rs!OrderNumber
+            ElseIf i > 1 Then
+                'get users' choice
+                DoCmd.OpenForm "CarryForward", , , , , acDialog
+                If Not IsNull(Formvar) Then
+                    rs.FindFirst "OrderNumber=" & Formvar
+                    Balance = Nz(rs!BalanceDue, 0)
+                End If
+            End If
+            
+            If Not IsNull(Formvar) Then
+                CarryForward = Balance
+                PrevOrderNum = rs!OrderNumber
+                PrevDate = rs!OrderDate
+            End If
+        End If
+        
+        If Not POS Then
+            rs.MoveFirst
+            x = rs!ShipName & rs!ShipCompany & ""
+            If x > "" Then
+                With rs
+                    x = !ShipName & ""
+                    If !ShipCompany & "" > "" Then x = x & vbCr & !ShipCompany
+                    If !ShipAddress & "" > "" Then x = x & vbCr & !ShipAddress
+                    If !ShipAddress2 & "" > "" Then x = x & vbCr & !ShipAddress2
+                    x = x & vbCr & Trim$(!ShipCity & " " & !ShipState & " " & !ShipZip)
+                    If !ShipCountry & "" > "" Then x = x & vbCr & !ShipCountry
+                
+                    Beep
+                    x = MsgBox("Use ShipTo address from previous order?" & cr2 & x, vbQuestion + vbYesNo, "Use Ship To Address?")
+                    If x = vbYes Then
+                        ParseName !ShipName, x, x1, x, x2, x
+                        f.txtShipFirstName = x1
+                        f.txtShipLastName = x2
+                        f.txtShipCompany = !ShipCompany
+                        f.txtShipPhone = !ShipPhone
+                        f.txtShipAddress = !ShipAddress
+                        f.txtShipAddress2 = !ShipAddress2
+                        f.txtShipCity = !ShipCity
+                        f.txtShipState = !ShipState
+                        f.txtShipZip = !ShipZip
+                        f.txtShipCountry = !ShipCountry
+                    Else
+                        f.txtShipFirstName = Null
+                        f.txtShipLastName = Null
+                        f.txtShipCompany = Null
+                        f.txtShipPhone = Null
+                        f.txtShipAddress = Null
+                        f.txtShipAddress2 = Null
+                        f.txtShipCity = Null
+                        f.txtShipState = Null
+                        f.txtShipZip = Null
+                        f.txtShipCountry = Null
+                    End If
+                End With
+            End If
+        End If
+    End If
+    
+    On Error Resume Next
+    rs.Close
+    rs2.Close
+    
+    Exit Sub
+    
+CCErr:
+    errortrap "Manual Orders, UseCCInfo", Err
+    Exit Sub
+    
+Add2Temp:
+    With rs2
+        .AddNew
+            !OrderNumber = rs!OrderNumber
+            !OrderDate = rs!OrderDate
+            !BalanceDue = rs!BalanceDue
+            !Name = rs!Name
+            !Company = rs!Company
+        .Update
+    End With
+    Return
+
+End Sub
+
+
+Function AbleCCParse(CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2)
+
+    Dim i%, p%, x, ImpVer%
+    '1/22/03:KBS
+    ImpVer = GetParm("AbleImportVersion")
+    
+    CCRef = "": AVS = "": AuthCode = "": CCStatus = 0  '0=unknown
+    '1/22/03:KBS
+    'If Len(CCInfo & "") < 21 Then Exit Function
+    If Len(CCInfo & "") < 21 And ImpVer < 2 Then Exit Function
+    
+    '1/22/03:KBS
+    If ImpVer = 2 Then  'KBS
+        CCRef = ParseField(CCInfo, "ID")
+        AVS = ParseField(CCInfo, "AVS")
+        AuthCode = ParseField(CCInfo, "AUTH")
+        i = 0
+        If CCRef > "" Then i = 1
+        '5/14/03:KBS commented out Authnet since Verisign sends authcode for pre-auth. Use parameter for all gateways...
+        'If CreditCardProcessor = "AuthorizeNet" Then
+            If GetParm("WebTransactionType") <> "Pre-Authorize" And AuthCode > "" Then i = 2
+        'Else
+        '    If AuthCode > "" Then i = 2
+        'End If
+        CCStatus = i
+    Else
+        Select Case CreditCardProcessor
+            Case "Verisign"
+                'Verisign example: 7-VSNE03481545-003898-N-Y
+                x = Left$(CCInfo, 1)
+                p = InStr(CCInfo, "-")
+                If p = 0 Then Exit Function
+                i = InStr(p + 1, CCInfo, "-")
+                If i = 0 Then Exit Function
+                If x = "S" Then CCStatus = 2 Else CCStatus = 1
+                CCRef = Mid$(CCInfo, p + 1, i - p - 1)
+                AuthCode = Mid$(CCInfo, i + 1, 6)
+                If Len(CCInfo) > 21 Then
+                    x = Right$(CCInfo, 3)
+                    AVS = Left$(x, 1) & Right$(x, 1)
+                End If
+            Case "AuthorizeNet"
+                'Example: 1,1,1,This transaction has been approved.,647886,A,270811947,2536,n/a,210.43,CC,auth_only,5,first name,last name,,address,city,state,zip,US,,,,,,,,,,,,0.00,0.00,0
+                ccResponse = CCInfo
+                CCRef = CCCommaParse(7)     'transaction ID
+                AVS = CCCommaParse(6)
+                ccAuthCode = CCCommaParse(5)
+                
+                x = CCCommaParse(12)
+                
+                '5/30/03: check for CCRef
+                If CCRef > "" Then
+                    If x = "auth_only" Then CCStatus = 1 Else CCStatus = 2
+                End If
+                
+        End Select
+    End If
+End Function
+Function AmericartCCParse(CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2)
+
+    Dim i%, j%, k%, l%, x
+    
+    CCRef = "": AVS = "": AuthCode = "": CVV2 = "": CCStatus = 0 '0=unknown
+    If CCInfo & "" = "" Then Exit Function
+    
+    'Select Case CreditCardProcessor
+    '    Case "Verisign"
+    '    Case "AuthorizeNet"
+            'example: Auth: 148035; AVS: Y; ID: 223084741
+            i = InStr(CCInfo, "Auth:")
+            If i > 0 Then
+                
+                '3/21/2020:
+                If GetParm("WebTransactionType") = "Pre-Authorize" Then CCStatus = 1 Else CCStatus = 2
+                
+                j = InStr(CCInfo, "ID:")
+                If j > 0 Then
+                    k = InStr(i + 5, CCInfo, ":")
+                    
+                    '3/21/2020:
+                    l = InStr(i + 5, CCInfo, ";")
+                    If l > 0 And l < k Then k = l
+                    
+                    If k = 0 Then
+                        AuthCode = Trim$(Mid$(CCInfo, i + 5))
+                    Else
+                        AuthCode = Trim$(Mid$(CCInfo, i + 5, k - (i + 5)))
+                    End If
+                    '10/6/03:KBS
+                    'k = InStr(j + 3, CCInfo, ":")
+                    k = InStr(j + 3, CCInfo, ";")
+                    
+                    If k = 0 Then
+                        CCRef = Trim$(Mid$(CCInfo, j + 3))
+                    Else
+                        '10/6/03:KBS
+                        'CCRef = Trim$(MId$(CCInfo, j + 3, k - (j + 3) + 1))
+                        CCRef = Trim$(Mid$(CCInfo, j + 3, k - (j + 3)))
+                    End If
+                    i = InStr(CCInfo, "AVS:")
+                    If i > 0 Then
+                        k = InStr(i + 4, CCInfo, ";")
+                        If k = 0 Then
+                            AVS = Trim$(Mid$(CCInfo, i + 4))
+                        Else
+                            AVS = Trim$(Mid$(CCInfo, i + 4, k - (i + 4)))
+                        End If
+                    End If
+                    
+                    '10/1/03:KBS
+                    i = InStr(CCInfo, "CVV2:")
+                    If i > 0 Then
+                        k = InStr(i + 4, CCInfo, ";")
+                        If k = 0 Then
+                            CVV2 = Trim$(Mid$(CCInfo, i + 5))
+                        Else
+                            CVV2 = Trim$(Mid$(CCInfo, i + 5, k - (i + 5)))
+                        End If
+                    End If
+                    
+                End If
+            End If
+    'End Select
+    
+End Function
+
+Function ParseField(Data, Key, Optional DataDelimiter = ":", Optional FieldDelimiter = ";")
+    
+    Dim i%, j%, Start%, x
+    
+    Data = Trim$(Data)
+    i = InStr(Data, Key & DataDelimiter)
+    If i = 0 Then
+        ParseField = ""
+    Else
+        Start = i + Len(Key) + 1
+        j = InStr(Start + 1, Data, FieldDelimiter)
+        If j = 0 Then j = InStr(Start + 1, Data & " ", " ")
+        ParseField = Trim$(Mid$(Data, Start, j - Start))
+        '12/11/02
+        If Right$(ParseField, 1) = ")" Then ParseField = Left$(ParseField, Len(ParseField) - 1)
+    End If
+
+End Function
+
+Function ShowAVSInfo(Optional Processor = "")
+
+    Dim x$, A$, z$, c$, y
+    
+    x = "": A = "": z = "": c = ""
+    
+    If ccAVSCode & "" > "" Then
+    
+        If Processor = "" Then Processor = GetParm("CreditCardProcessor")
+        
+        x = "AVS=" & ccAVSCode
+        If Processor = "AuthorizeNet" Then
+            Select Case ccAVSCode
+                Case "A": A = "OK": z = "BAD"
+                Case "E": A = "AVS Error"
+                Case "N": A = "BAD": z = "BAD"
+                Case "P": A = "AVS not applicable for this transaction"
+                Case "R": A = "System unavailable or timed out"
+                Case "S": A = "Services not supported by issuer"
+                Case "U": A = "Address info unavailable"
+                Case "W", "Z": A = "BAD": z = "OK"
+                Case "X", "Y": A = "OK": z = "OK"
+            End Select
+        ElseIf Processor = "Echo-Inc" Or Processor = "Skipjack" Or Processor = "PCCharge" Then
+            Select Case ccAVSCode
+                Case "A": A = "OK": z = "BAD"
+                Case "B": A = "OK": z = "n/a"
+                Case "C": A = "n/a": z = "n/a"
+                Case "D": A = "OK": z = "OK"
+                Case "E": A = "Invalid Response"
+                Case "G": A = "Issuer Unavailable"
+                Case "I": A = "International not verified"
+                Case "M": A = "OK": z = "OK"
+                Case "N": A = "BAD": z = "BAD"
+                Case "P": A = "n/a": z = "OK"
+                Case "R": A = "System unavailable or timed out"
+                Case "S": A = "Services not supported by issuer"
+                Case "U": A = "Services not supported by issuer"
+                Case "W", "Z": A = "BAD": z = "OK"
+                Case "X", "Y": A = "OK": z = "OK"
+            End Select
+        Else
+            'Verisign or USAEPay or Linkpoint:
+            Select Case Left$(ccAVSCode, 1)
+                Case "Y": A = "OK"
+                Case "N": A = "BAD"
+                Case Else: A = "n/a"
+            End Select
+            Select Case Mid$(ccAVSCode, 2, 1)
+                Case "Y": z = "OK"
+                Case "N": z = "BAD"
+                Case Else: z = "n/a"
+            End Select
+        End If
+        
+        If A > "" Then
+            x = x & cr & "     "
+            If A = "OK" Or A = "BAD" Then x = x & "Address="
+            x = x & A
+        End If
+        If z > "" Then x = x & cr & "     " & "Zip=" & z
+        
+    End If
+        
+    '2/4/03: added "Y" for Verisign
+    Select Case ccCVV2 & ""
+        Case "M", "Y": c = "Match"
+        Case "N": c = "No Match"
+        Case "P", "U": c = "Unprocessed"
+        Case "S": c = "Not Present"
+        Case ""
+        Case Else: c = "n/a"
+    End Select
+    If c > "" Then
+        If x > "" Then x = x & cr2
+        x = x & "cvv2=" & c
+    End If
+    
+    If x > "" Then x = cr2 & x
+    ShowAVSInfo = x
+    
+End Function
+
+Function SmartCartCCParse(CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2)
+
+    Dim i%, j%, k%, l%, x
+    
+    CCRef = "": AVS = "": AuthCode = "": CCStatus = 0  '0=unknown
+    If CCInfo & "" = "" Then Exit Function
+    
+    'Select Case CreditCardProcessor
+    '    Case "Verisign"
+    '    Case "AuthorizeNet"
+            'example: Auth: 148035; AVS: Y; ID: 223084741
+            i = InStr(CCInfo, "Auth:")
+            If i > 0 Then
+                
+                '3/21/2020:
+                If GetParm("WebTransactionType") = "Pre-Authorize" Then CCStatus = 1 Else CCStatus = 2
+                
+                j = InStr(CCInfo, "ID:")
+                If j > 0 Then
+                    k = InStr(i + 5, CCInfo, ":")
+                    
+                    '3/21/2020:
+                    l = InStr(i + 5, CCInfo, ";")
+                    If l > 0 And l < k Then k = l
+                    
+                    If k = 0 Then
+                        AuthCode = Trim$(Mid$(CCInfo, i + 5))
+                    Else
+                        AuthCode = Trim$(Mid$(CCInfo, i + 5, k - (i + 5)))
+                    End If
+                    k = InStr(j + 3, CCInfo, ":")
+                    
+                    If k = 0 Then
+                        CCRef = Trim$(Mid$(CCInfo, j + 3))
+                    Else
+                        CCRef = Trim$(Mid$(CCInfo, j + 3, k - (j + 3) + 1))
+                    End If
+                    i = InStr(CCInfo, "AVS:")
+                    If i > 0 Then
+                        k = InStr(i + 4, CCInfo, ";")
+                        If k = 0 Then
+                            AVS = Trim$(Mid$(CCInfo, i + 4))
+                        Else
+                            AVS = Trim$(Mid$(CCInfo, i + 4, k - (i + 4)))
+                        End If
+                    End If
+                End If
+            End If
+    'End Select
+    
+End Function
+
+
+Function OneShoppingCartCCParse(CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2)
+
+    Dim i%, j%, k%, l%, x
+    
+    CCRef = "": AVS = "": AuthCode = "": CCStatus = 0  '0=unknown
+    If CCInfo & "" = "" Then Exit Function
+    
+    'Select Case CreditCardProcessor
+    '    Case "Verisign"
+    '    Case "AuthorizeNet"
+            'example: Auth: 148035; AVS: Y; ID: 223084741
+            i = InStr(CCInfo, "Auth:")
+            If i > 0 Then
+                
+                '3/21/2020:
+                If GetParm("WebTransactionType") = "Pre-Authorize" Then CCStatus = 1 Else CCStatus = 2
+                
+                j = InStr(CCInfo, "ID:")
+                If j > 0 Then
+                    k = InStr(i + 5, CCInfo, ":")
+                    
+                    '3/21/2020:
+                    l = InStr(i + 5, CCInfo, ";")
+                    If l > 0 And l < k Then k = l
+                    
+                    If k = 0 Then
+                        AuthCode = Trim$(Mid$(CCInfo, i + 5))
+                    Else
+                        AuthCode = Trim$(Mid$(CCInfo, i + 5, k - (i + 5)))
+                    End If
+                    k = InStr(j + 3, CCInfo, ":")
+                    
+                    If k = 0 Then
+                        CCRef = Trim$(Mid$(CCInfo, j + 3))
+                    Else
+                        CCRef = Trim$(Mid$(CCInfo, j + 3, k - (j + 3) + 1))
+                    End If
+                    i = InStr(CCInfo, "AVS:")
+                    If i > 0 Then
+                        k = InStr(i + 4, CCInfo, ";")
+                        If k = 0 Then
+                            AVS = Trim$(Mid$(CCInfo, i + 4))
+                        Else
+                            AVS = Trim$(Mid$(CCInfo, i + 4, k - (i + 4)))
+                        End If
+                    End If
+                End If
+            End If
+    'End Select
+    
+End Function
+
+
+Sub AuthNetParse()
+    
+    'string to parse should be in CCResponse
+
+    Dim x
+    
+    'Result Code Fields:
+    '1  Response 1=Approved, 2=Declined, 3=Error
+    '2  n/a
+    '3  response reason code
+    '4  response reason text
+    '5  auth code (6 digits)
+    '6  AVS code
+        'A: Address matches, Zip does not
+        'E: AVS error
+        'N: No match on address or Zip
+        'P: AVS not applicable for this transaction
+        'R: Retry - system not available or timed out
+        'S: Service not supported
+        'U: Address unavailable
+        'W: 9 digit Zip matches, address does not
+        'X: exact AVS match
+        'Y: Address and 5 digit Zip match
+        'Z: 5 digit Zip matches, Address does not
+    '7  transaction ID
+    '8  Invoice (Order) number
+    '9  n/a
+    '10 Amount
+    'rest of fields n/a
+    
+    ccResult = CCCommaParse(1)
+    ccRESPMSG = CCCommaParse(4)
+    ccAuthCode = CCCommaParse(5)
+    ccAVSCode = CCCommaParse(6)
+    ccPNREF = CCCommaParse(7)
+    
+    '7/30/02:
+    ccCVV2 = CCCommaParse(39)
+    
+    '7/7/03:KBS Added check for decline due to AVS/CVV2
+    x = CCCommaParse(3)
+    ccBadAVS = False
+    ccBadCVV2 = False
+    If ccResult <> 1 Then
+        Select Case x
+            Case 27, 45, 127, 145: ccBadAVS = True
+            Case 44, 65, 78, 165: ccBadCVV2 = True
+        End Select
+    End If
+    
+End Sub
+
+Function CCCommaParse(ByVal Which)
+
+    'given a comma delimited string, return the requested element
+    'string to parse should be in CCResponse
+    
+    Dim i%, j%, k%, x$, OK%
+    
+    CCCommaParse = ""
+    
+    x = ccResponse & ""
+    If x > "" Then
+        If Which = 1 Then
+            i = InStr(x, ",")
+            If i > 0 Then CCCommaParse = Left$(x, i - 1) Else CCCommaParse = x
+        Else
+            j = 0: OK = True
+            For i = 1 To Which - 1
+                j = InStr(j + 1, x, ",")
+                If j = 0 Then OK = False: Exit For
+            Next
+            If OK Then
+                k = InStr(j + 1, x, ",")
+                If k = 0 Then
+                    CCCommaParse = Mid$(x, j + 1)
+                Else
+                    CCCommaParse = Mid$(x, j + 1, k - (j + 1))
+                End If
+            End If
+        End If
+    End If
+    
+End Function
+
+Function CCParse(ByVal Which, Optional what = "")
+
+    '10/31/2020: modify for other strings besides ccResponse:
+    '3/27/02: modify for new ShopSite 6 / Verisign format (spaces instead of &'s, colon at end)
+    
+    Dim i%, j%, Start%, x
+    
+    If what = "" Then what = ccResponse
+    
+    '3/27/02:
+    what = Trim$(what)
+    If Right$(what, 1) = ":" Then what = Left$(what, Len(what) - 1)
+    
+    i = InStr(what, Which & "=")
+    If i = 0 Then
+        CCParse = ""
+    Else
+        '3/27/02: allow space or &:
+        x = Mid$(" " & what, i, 1)
+        If i > 1 And (x <> "&" And x <> " " And x <> ":") Then
+            CCParse = ""
+        Else
+            Start = i + Len(Which) + 1
+            'j = InStr(Start, what & "&", "&")
+            j = InStr(Start, what, "&")
+            If j = 0 Then j = InStr(Start, what & " ", " ")
+            CCParse = Mid$(what, Start, j - Start)
+        End If
+    End If
+    
+End Function
+
+
+Function CCSend(TransType, AcctNum, ExpDate, Amt, Addr, Zip, FirstName, LastName, Email, FullName, Company, City, _
+        State, Country, Phone, Fax, Optional AuthCode = "", Optional AuthAmt = 0, _
+        Optional Order = 0, Optional OrigID = "", Optional Cust, Optional Silent = False, Optional CVV2 = "", _
+        Optional TransDate, Optional Settle = False, Optional OrigTransType = "", Optional POS = False)
+
+    '4/17/03: replace URLEncode with local subroutine
+    
+    Dim x
+    '7/11/03:KBS
+    ccResponse = Null
+    ccResult = Null
+    ccRESPMSG = Null
+    ccPNREF = Null
+    
+    ccTransType = TransType
+    ccAcctNum = AcctNum
+    ccExpDate = ExpDate
+    
+    '5/28/03
+    If Len(ccExpDate) = 6 Then
+        If Mid$(ccExpDate, 3, 2) = "20" Then ccExpDate = Left$(ccExpDate, 2) & Mid$(ccExpDate, 5)
+    End If
+    
+    ccAmt = Amt
+    ccAddr = NoAmpersands(Addr)
+    ccZip = Zip
+    ccAuthCode = AuthCode
+    ccAuthAmt = AuthAmt
+    ccOrder = Order
+    ccOrigID = OrigID
+    
+    '11/05/03
+    x = InStr(OrigID, ";")
+    If x > 0 Then ccOrigID = Left$(OrigID, x - 1)
+    
+    ccFirstName = NoAmpersands(FirstName)
+    ccLastName = NoAmpersands(LastName)
+    ccEmail = Email
+    ccCustomer = Cust
+    ccCVV2 = CVV2
+    '4/10/03:KBS
+    ccTransDate = TransDate
+    ccSettleBatch = Settle
+    ccOrigTransType = OrigTransType
+    
+    ccCompany = NoAmpersands(Company)
+    ccCity = NoAmpersands(City)
+    ccState = State
+    ccCountry = NoAmpersands(Country)
+    ccPhone = Phone
+    ccFax = Fax
+    ccName = NoAmpersands(FullName)
+    
+    If FirstName & LastName = "" And FullName > "" Then
+        ParseName FullName, x, ccFirstName, x, ccLastName, x
+        ccFirstName = NoAmpersands(ccFirstName)
+        ccLastName = NoAmpersands(ccLastName)
+    End If
+    
+    '7/14/03:KBS
+    'x = CreditCardProcessor & ""
+    'If x = "None" Or x = "" Then x = GetParm("CreditCardProcessor")
+    If POS Then
+        x = GetParm("CreditCardProcessorPOS")
+    Else
+        x = GetParm("CreditCardProcessor")
+    End If
+    
+    Select Case x
+        Case ""
+            Beep
+            MsgBox "Credit card processor not set - can't send transaction!"
+        'Case "Verisign": CCSend = VerisignSend(Silent)
+        Case "Verisign": CCSend = VerisignSendNew(Silent)
+        
+        Case "AuthorizeNet": CCSend = AuthNetSend(Silent)
+        '4/10/03:KBS
+        Case "USAEPay": CCSend = USAEPaySend(Silent)
+        Case "Echo-Inc": CCSend = EchoSend(Silent)
+        Case "Skipjack": CCSend = SkipJackSend(Silent)
+        '7/9/03:KBS
+        Case "PCCharge": CCSend = PCChargeSend(Silent, POS)
+        Case Else
+            Beep
+            MsgBox "Unknown processor - can't send request!"
+    End Select
+
+End Function
+
+Function JustNumerals(what, Optional AllowLetters% = False, Optional AllowDecimals% = False)
+
+    'given a string of characters, strip out anything that is not a numeral:
+    
+    Dim x, y, z, i%
+    
+    x = ""
+    y = what & ""
+    If y > "" Then
+        For i = 1 To Len(y)
+            z = Mid$(y, i, 1)
+            If z >= "0" And z <= "9" Then x = x & z
+            If AllowLetters Then
+                z = UCase$(z & "")
+                If z >= "A" And z <= "Z" Then x = x & z
+            End If
+            If AllowDecimals Then
+                If z = "." Then x = x & z
+            End If
+        Next
+    End If
+    JustNumerals = x
+    
+End Function
+
+Function MivaCCParse(CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2)
+
+    Dim i%, Processor$
+    
+    '9/3/02: changed AuthNet code
+    
+    CCRef = ParseField(CCInfo, "ID")
+    AVS = ParseField(CCInfo, "AVS")
+    AuthCode = ParseField(CCInfo, "AUTH")
+    
+    i = 0
+    If CCRef > "" Then i = 1
+    
+    Processor = GetParm("CreditCardProcessor")
+    '7/8/03: add Echo
+    If Processor = "AuthorizeNet" Or Processor = "Echo-Inc" Then
+        If GetParm("WebTransactionType") <> "Pre-Authorize" And AuthCode > "" Then i = 2
+    Else
+        If AuthCode > "" Then i = 2
+    End If
+    
+    CCStatus = i
+    
+End Function
+
+Function ParseCCInfo(CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2, CartType)
+
+    'given CCInfo Field, return CCRef, AVS, AuthCode & Status; based on CC type and Store Type
+    '7/22/03:Kbs changed from storetype to passed cart type
+    
+    CVV2 = ""
+    Select Case CartType & ""
+        Case "SS", "": ShopSiteCCParse CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2
+        Case "YS": YahooCCParse CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2
+        Case "MV": MivaCCParse CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2
+        Case "AC", "VirtualCart": AmericartCCParse CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2
+        Case "AB": AbleCCParse CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2
+        Case "SC": SmartCartCCParse CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2
+        Case "1S": OneShoppingCartCCParse CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2
+        Case "AZ"
+        Case "HC"
+        Case "32"
+        Case "GC", "OS", "AL", "GW", "MC": GenericCCParse CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2
+        Case Else: Stop
+    End Select
+
+End Function
+
+'Function ShopSiteCCParse(CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2)
+'
+'    Dim x, y, i As Long
+'
+'    '8/27/2020: for Verisign, get original reference ID:
+'    CCRef = "": AVS = "": AuthCode = "": CCStatus = 0  '0=unknown
+'    x = CCInfoPrefix
+'
+'    '3/27/02: modified for SS6
+'    Select Case x
+'        Case "*ONA*"
+'            'Verisign example: *ONA*:VXVE04100723:0007359520201179635909112NY
+'            i = InStr(CCInfo, x)
+'            If i > 0 Then
+'                x = Mid$(CCInfo, i)
+'                x = Mid$(x, Len("*ONA*:") + 1)
+'                i = InStr(x, ":")
+'                If i > 0 Then
+'                    CCRef = Left$(x, i - 1)
+'                    CCStatus = 1      '1=authorized
+'                    If InStr(CCInfo, "*ONA-BILL*") > 0 Then CCStatus = 2   '2=captured
+'                End If
+'            End If
+'            'get the AVS data:
+'            x = CCInfo
+'            Do
+'                y = Right$(x, 1)
+'                If y = ")" Or y = ":" Or y = Chr$(10) Or y = Chr$(13) Then
+'                    x = Left$(x, Len(x) - 1)
+'                Else
+'                    Exit Do
+'                End If
+'            Loop
+'            x = Right$(x, 2)
+'            If Len(x) = 2 Then
+'                y = Left$(x, 1)
+'                If y = "Y" Or y = "N" Or y = "X" Then
+'                    y = Right$(x, 1)
+'                    If y = "Y" Or y = "N" Or y = "X" Then AVS = x
+'                End If
+'            End If
+'        Case "*VPS*"
+'            '7/30/02: added CVV2 info: *VPS-AUTH*:RESULT=0 PNREF=VRMA51908831 RESPMSG=Approved AUTHCODE=20207378 AVSADDR=Y AVSZIP=Y CVV2MATCH=Y:
+'
+'            CCRef = CCParse("PNREF", CCInfo)
+'            AuthCode = CCParse("AUTHCODE", CCInfo)
+'            AVS = CCParse("AVSADDR", CCInfo) & CCParse("AVSZIP", CCInfo)
+'
+'            '7/30/02:
+'            CVV2 = CCParse("CVV2MATCH", CCInfo)
+'
+'            '5/30/03
+'            If CCRef > "" Then
+'                'deal with old & new versions:
+'                CCStatus = 1      '1=authorized
+'                '8/29/02: check AUTH first, then the others
+'                If InStr(CCInfo, "*VPS-AUTH*") > 0 Then CCStatus = 1   '2=authorized
+'                If InStr(CCInfo, "*VPS-BILL*") > 0 Then CCStatus = 2   '2=captured
+'                If InStr(CCInfo, "*VPS-SALE*") > 0 Then CCStatus = 2   '2=captured
+'            End If
+'
+'        Case "*ANET*:"
+'            'Authorize.Net examples:
+'            '*ANET*:196074667:20203189,Y,(1-1) This transaction has been approved.: (could be approved OR full capture!!!)
+'            '*ANET*:196081188:20203732,Y,(1-1) This transaction has been approved.:*ANET-BILL*:000000:
+'            '*ANET*:186644393:
+'
+'            i = InStr(CCInfo, x)
+'            If i > 0 Then
+'                x = Mid$(CCInfo, i)
+'                x = Mid$(x, Len("*ANET*:") + 1)
+'                i = InStr(x, ":")
+'                If i > 0 Then
+'                    CCRef = Left$(x, i - 1)
+'                    CCStatus = 1      '1=authorized
+'                    If InStr(CCInfo, "*ANET-BILL*") > 0 Then CCStatus = 2   '2=captured
+'
+'                    '10/28/02: can't tell difference between Auth and full Sale; must depend on System Parm:
+'                    If GetParm("WebTransactionType") = "Sale" Then CCStatus = 2    '2=captured
+'
+'                    'is there an approval code?
+'                    If i < Len(x) Then
+'                        x = Mid$(x, i + 1)
+'                        i = InStr(x, ",")
+'                        If i > 1 Then
+'                            AuthCode = Left$(x, i - 1)
+'                            AVS = Mid$(x, i + 1, 1)
+'                        End If
+'                    End If
+'                End If
+'            End If
+'        Case Else           '3/28/02 : Stop
+'    End Select
+'
+'End Function
+
+Function ShopSiteCCParse(CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2)
+    
+    Dim x, y, i&, j&
+    
+    'for Verisign, get original reference ID
+    CCRef = "": AVS = "": AuthCode = "": CCStatus = 0  '0=unknown
+    x = GetParm("CCInfoPrefix")
+    If x = "*ANET-SALE*:" Then x = "*ANET*:"
+    Select Case x
+        Case "*ONA*"
+            'Verisign example: *ONA*:VXVE04100723:0007359520201179635909112NY
+            i = InStr(CCInfo, x)
+            If i > 0 Then
+                x = Mid$(CCInfo, i)
+                x = Mid$(x, Len("*ONA*:") + 1)
+                i = InStr(x, ":")
+                If i > 0 Then
+                    CCRef = Left$(x, i - 1)
+                    CCStatus = 1      '1=authorized
+                    If InStr(CCInfo, "*ONA-BILL*") > 0 Then CCStatus = 2   '2=captured
+                End If
+            End If
+            'get the AVS data
+            x = CCInfo
+            Do
+                y = Right$(x, 1)
+                If y = ")" Or y = ":" Or y = Chr$(10) Or y = Chr$(13) Then
+                    x = Left$(x, Len(x) - 1)
+                Else
+                    Exit Do
+                End If
+            Loop
+            x = Right$(x, 2)
+            If Len(x) = 2 Then
+                y = Left$(x, 1)
+                If y = "Y" Or y = "N" Or y = "X" Then
+                    y = Right$(x, 1)
+                    If y = "Y" Or y = "N" Or y = "X" Then AVS = x
+                End If
+            End If
+        '2/10/09:KBS added PFPRO
+        Case "*VPS*", "*PFPRO*"
+            'CVV2 info: *VPS-AUTH*:RESULT=0 PNREF=VRMA51908831 RESPMSG=Approved AUTHCODE=20207378 AVSADDR=Y AVSZIP=Y CVV2MATCH=Y:
+            '           *PFPRO-SALE*:RESULT=0 PNREF=VTHA3B9670FC RESPMSG=Approved AUTHCODE=04341C AVSADDR=Y AVSZIP=Y CVV2MATCH=Y IAVS=N:
+            CCRef = CCParse("PNREF", CCInfo)
+            AuthCode = CCParse("AUTHCODE", CCInfo)
+            AVS = CCParse("AVSADDR", CCInfo) & CCParse("AVSZIP", CCInfo)
+            CVV2 = CCParse("CVV2MATCH", CCInfo)
+            If CCRef > "" Then
+                'deal with old & new versions
+                CCStatus = 1      '1=authorized
+                'check AUTH first, then the others
+                If InStr(CCInfo, "*VPS-AUTH*") > 0 Then CCStatus = 1   '2=authorized
+                If InStr(CCInfo, "*VPS-BILL*") > 0 Then CCStatus = 2   '2=captured
+                If InStr(CCInfo, "*VPS-SALE*") > 0 Then CCStatus = 2   '2=captured
+                '2/10/09:KBS
+                If InStr(CCInfo, "*PFPRO-AUTH*") > 0 Then CCStatus = 1   '2=authorized
+                If InStr(CCInfo, "*PFPRO-BILL*") > 0 Then CCStatus = 2   '2=captured
+                If InStr(CCInfo, "*PFPRO-SALE*") > 0 Then CCStatus = 2   '2=captured
+            End If
+            
+        Case "*ANET*:"
+            'Authorize.Net examples:
+            '*ANET*:196074667:20203189,Y,(1-1) This transaction has been approved.: (could be approved OR full capture!!!)
+            '*ANET*:196081188:20203732,Y,(1-1) This transaction has been approved.:*ANET-BILL*:000000:
+            '*ANET*:186644393:
+            
+            y = x
+            i = InStr(CCInfo, x)
+            If i = 0 Then
+                y = "*ANET-SALE*:"
+                i = InStr(CCInfo, y)
+            End If
+            
+            If i > 0 Then
+                x = Mid$(CCInfo, i)
+                x = Mid$(x, Len(y) + 1)
+                i = InStr(x, ":")
+                If i > 0 Then
+                    CCRef = Left$(x, i - 1)
+                    CCStatus = 1      '1=authorized
+                    If InStr(CCInfo, "*ANET-BILL*") > 0 Then CCStatus = 2   '2=captured
+                
+                    'can't tell difference between Auth and full Sale; must depend on System Parm
+                    If GetParm("WebTransactionType") = "Sale" Then CCStatus = 2 '2=captured
+                    
+                    'is there an approval code?
+                    If i < Len(x) Then
+                        x = Mid$(x, i + 1)
+                        i = InStr(x, ",")
+                        If i > 1 Then
+                            AuthCode = Left$(x, i - 1)
+                            AVS = Mid$(x, i + 1, 1)
+                        End If
+                    End If
+                End If
+            End If
+            
+        Case "*YOURPY"
+            'LinkPoint/YourPay Example:
+            'YOURPY-SALE*: APPROVED: TIME=Fri Dec 22 11:05:21 2006: REF=202080733940: APPROVAL=05482B: AVS=YYY: CVV2=M: ORDERNUM=45FA5AC8-458C1E5B-648-1E0FB8:"
+            i = InStr(CCInfo, x)
+            If i > 0 Then
+                i = InStr(CCInfo, "REF=")
+                If i > 0 Then
+                    j = InStr(i, CCInfo, ":")
+                    If j > (i + 4) Then
+                        CCRef = Mid$(CCInfo, i + 4, j - (i + 4))
+                    End If
+                End If
+                
+                i = InStr(CCInfo, "Approval=")
+                If i > 0 Then
+                    j = InStr(i, CCInfo, ":")
+                    If j > (i + 9) Then
+                        AuthCode = Mid$(CCInfo, i + 9, j - (i + 9))
+                    End If
+                End If
+                
+                i = InStr(CCInfo, "AVS=")
+                If i > 0 Then
+                    j = InStr(i, CCInfo, ":")
+                    If j > (i + 4) Then
+                        AVS = Mid$(CCInfo, i + 4, j - (i + 4))
+                    End If
+                End If
+                
+                i = InStr(CCInfo, "CVV2=")
+                If i > 0 Then
+                    j = InStr(i, CCInfo, ":")
+                    If j > (i + 5) Then
+                        CVV2 = Mid$(CCInfo, i + 5, j - (i + 5))
+                    End If
+                End If
+                
+                If GetParm("WebTransactionType") = "Sale" Then CCStatus = 2 Else CCStatus = 1
+            End If
+        Case Else
+    End Select
+
+End Function
+
+Function PCChargeSend(Silent, POS)
+
+    'code creates a fixed width file in the installation directory of PC Charge
+    'waits until PC Charge writes a response file then reads the result into the global CC variables
+    
+    Dim PCLoc$, x, Data$, PCProc$, MerchID$, Action%, RefNum$, y, TransID$, cnt%, f&, PCUser$, Start
+    Dim GotFile%, DoShort%, rs As Recordset, Notes$, i&, db As Database, msg$, DoMO%
+    
+    PCChargeSend = False
+    
+    PCLoc = GetParm("PCChargeDirectoryLocation")
+    DoMO = GetParm("PCChargePOSIsMailOrderAcct")
+    If PCLoc & "" = "" Then
+        x = "PCCharge directory location parameter not set, cannot continue."
+        GoTo DOErr
+    End If
+    
+    If Right$(PCLoc, 1) <> "\" Then PCLoc = PCLoc & "\"
+    
+    '11/25/03:KBS
+    If Not FileExists(PCLoc & "PCCW.exe") And Not FileExists(PCLoc & "Active-Charge.exe") Then
+        Beep
+        MsgBox "PCCharge not found at the following path: " & PCLoc & ". Check the parameter PCChargeDirectoryLocation."
+        Exit Function
+    End If
+    
+    If FileExists(PCLoc & "sys.pcc") Then
+        'An error exists in PCCharge, Read the file for the error code and prompt the user
+        x = val(ReadTextFileIntoString(PCLoc & "sys.pcc"))
+        x = x + 1
+        Select Case x
+            Case 1: x = "PCCharge is not running."
+            Case 2: x = "Re-Index in progress."
+            Case 3: x = "Batch Function (close/inquire/settle) in progress."
+            Case 4: x = "Backup or Restore in progress."
+            Case 5: x = "Unable to initialize Modem."
+            Case 6: x = "Transaction Timeout."
+            Case 7: x = "Invalid Path."
+            Case 8: x = "Invalid Credit Card Number."
+            Case 9: x = "Invalid Action."
+            Case 10: x = "Invalid Expiration Date."
+            Case 11: x = "Invalid Amount."
+            Case 12: x = "Invalid Processor."
+            Case 13: x = "Invalid Merchant Number."
+            Case 14: x = "Invalid Batch Sequence Number."
+            Case 15: x = "Canceled by Operator."
+            Case 16: x = "System busy."
+            Case Else: x = "Unknown Error."
+        End Select
+        x = "ERROR: " & x & " Cannot process transaction."
+        GoTo DOErr
+    End If
+    
+    If POS = True Then
+        PCProc = GetParm("PCChargeProcessorPOS")
+        MerchID = GetParm("PCChargeMerchantIDPOS")
+    Else
+        PCProc = GetParm("PCChargeProcessorWEB")
+        MerchID = GetParm("PCChargeMerchantIDWEB")
+    End If
+
+    If Len(MerchID) > 32 Then
+        x = "ERROR: Merchant ID has too many characters."
+        GoTo DOErr
+    End If
+    If PCProc & "" = "" Or MerchID & "" = "" Then
+        x = "ERROR: One or more of the PCCharge system parameters not set, cannot process payment"
+        GoTo DOErr
+    End If
+    
+    PCUser = ""
+    x = GetComputerName
+    If GetParm("PCChargeUnlimitedUsers") Then
+        '9/8/03
+        'PCUser = "PCUser"
+        PCUser = x
+    Else
+        '9/8/03: moved both sections below
+        'x = GetComputerName
+        PCUser = DLookup("Text2", "Lists", "List='PCCharge' AND Text1='" & x & "'") & ""
+        'If PCUser = "" Then
+        '    x = "ERROR: PCCharge user name not defined for this PC, cannot process payment"
+        '    GoTo DoErr
+        'End If
+    End If
+    If PCUser = "" Then
+        x = "ERROR: PCCharge user name not defined for this PC, cannot process payment"
+        GoTo DOErr
+    End If
+    
+    Data = ""
+    PCProc = GetPCChargeProcessorCode(PCProc)
+    If x = "" Then
+        x = "ERROR: Selected processing company not recognized, cannot process payment."
+        GoTo DOErr
+    End If
+    y = ""
+    DoShort = False
+    Select Case ccTransType
+        Case "S": y = 1                                                 'Sale
+        Case "C": y = 2                                                 'Credit
+        Case "A": y = 4                                                 'Auth
+        Case "D", "F": y = 5: DoShort = True                            'Delayed_Capture of regular auth
+        Case "V"
+            DoShort = True
+            Select Case ccOrigTransType
+                Case "Capture": y = 7                                    'Void Post-Auth
+                Case "Sale", "PreAuth": y = 3                            'Void Sale
+                Case "Credit": y = 6                                     'Void Credit
+            End Select
+        Case Else: Stop
+    End Select
+    If y = "" Then
+        x = "ERROR: Transaction type not found, cannot process transaction"
+        GoTo DOErr
+    End If
+    Action = y
+    
+    'START WRITING DATA FILE - IF VOID OR CAPTURE ONLY WRITE PCCHARGEID TO TRANSID FIELD AND ACTION CODE
+    If DoShort Then
+        x = "": y = 60: GoSub AddData
+        x = Action: y = 2: GoSub AddData
+        x = "": y = 156: GoSub AddData
+        x = ccOrigID & "": y = 38: GoSub AddData
+    Else
+        x = PCProc: y = 4: GoSub AddData                        'Processor code 4 bytes
+        x = MerchID: y = 32: GoSub AddData                      'MerchantID 32 bytes
+        If Len(ccAcctNum & "") <= 20 Then
+            x = ccAcctNum & "": y = 20: GoSub AddData           'Card Number 20 bytes
+        Else
+            x = "ERROR: Card Number exceeds the 20 digit limit."
+            GoTo DOErr
+        End If
+        If Len(ccExpDate) > 4 Then
+            x = "ERROR: Expiration Date exceeds the 4 digit limit."
+            GoTo DOErr
+        End If
+        x = ccExpDate & "": y = 4: GoSub AddData                'ExpDate 4 bytes
+    
+        x = Action: y = 2: GoSub AddData                        'action code 2 bytes
+        '11/25/03:KBS
+        'x = 0: y = 1: GoSub AddData
+        '3/16/04:KBS - New Parm
+        'If CardRead Then x = 1 Else x = 0                       'Manual Transaction 1 byte 0=Manual 1=Swipe
+        If CardRead And Not DoMO Then x = 1 Else x = 0
+        y = 1: GoSub AddData
+        
+        If Len(ccAmt & "") <= 9 Then
+            x = ccAmt & "": y = 9: GoSub AddData                'Transaction Amount 9 bytes
+        Else
+            x = "ERROR: Transaction amount exceeds PCCharge limit"
+            GoTo DOErr
+        End If
+        x = "": y = 8: GoSub AddData                            'Reference Number 8 bytes
+        '11/25/03:KBS
+        'x = "": y = 40: GoSub AddData
+        '3/16/04:KBS
+        'If CardRead Then
+        If CardRead And Not DoMO Then
+            x = Left$(Track2Data, 40): y = 40: GoSub AddData    'TrackII Data from card reader
+        Else
+             x = "": y = 40: GoSub AddData                      'Empty for card not present sale
+        End If
+        
+        x = ccOrder: y = 25: GoSub AddData                      'CID - PO number 25 bytes
+        x = "": y = 9: GoSub AddData                            'TaxAmount for purchasing cards
+        x = "": y = 2: GoSub AddData                            'Addt'l file type for use with BOC only
+        x = 0: y = 1: GoSub AddData                             'Number of receipts to print
+        x = 0: y = 1: GoSub AddData                             'Periodic pmt 1=true, 0=false
+        x = 0: y = 1: GoSub AddData                             'Offline processing 1=true, 0=false
+        x = "": y = 1: GoSub AddData                            'Void Flag PCCharge Virtual terminal only
+        
+        If Action = 1 Or Action = 4 Then
+            '2/27/04
+            'x = ccZip & "": y = 9: GoSub AddData                'Zip for AVS
+            x = Left$(JustNumerals(ccZip & "", True), 9): y = 9: GoSub AddData              'Zip for AVS
+        Else
+            x = "": y = 9: GoSub AddData                        'Nada
+        End If
+        
+        '1/14/04: added CleanCharacters for Addr & Name
+        x = Left(CleanCharacters(ccAddr & ""), 20): y = 20: GoSub AddData        'Street address for AVS
+                
+        x = ccOrder: y = 9: GoSub AddData                       'Ticket number
+        x = Left(CleanCharacters(ccName & ""), 20): y = 20: GoSub AddData        'Cardholder name
+        x = "": y = 15: GoSub AddData                           'Nada
+        x = "": y = 9: GoSub AddData
+        x = "": y = 4: GoSub AddData                            'Open field
+        x = "": y = 2: GoSub AddData                            'MSCN
+        x = "": y = 2: GoSub AddData                            'MCSC
+        x = 0: y = 1: GoSub AddData                             'MultiTransWait
+        x = ccCVV2 & "": y = 4: GoSub AddData                   'CVV2 data
+        '10/16/03
+        'x = 0: y = 1: GoSub AddData                             'Card Present 0=false, 1=true restaurant only
+        If PCProc = "VISA" Then x = "P" Else x = 0
+        y = 1: GoSub AddData                                     'Card Present 0=false, 1=true restaurant only"
+    End If
+    
+    If Len(Data) <> 256 Then Stop
+    
+    If Not Silent Then SysCmd acSysCmdSetStatus, "Sending information to PCCharge..."
+    
+    '8/22/03 moved from below & add Kill
+    '9/2/03:KBS
+    'y = PCLoc & PCUser & ".out"
+    'If FileExists(y) Then Kill y: DoEvents
+    
+    Notes = ""
+    y = PCLoc & PCUser & ".out"
+    If FileExists(y) Then
+        i = 1
+        Do
+            x = PCLoc & PCUser & "-" & Format(Date, "mmddyy") & "-" & i & ".txt"
+            i = i + 1
+        Loop Until FileExists(x) = False
+        FileCopy y, x
+        Kill y
+        Notes = "Previous PCCharge Output File (" & y & ") found. File was renamed to avoid reprocessing. New file name is: " & x
+    End If
+    
+    f = FreeFile
+    x = PCLoc & PCUser & ".inp"
+    If FileExists(x) Then Kill (x)
+    Open x For Output As #f
+    Print #f, Data
+    Close #f
+    'Check for the return .out file and wait until 128 bytes in length
+    
+    '8/22/03:moved
+    'y = PCLoc & PCUser & ".out"
+    
+    Start = Timer
+    GotFile = False
+    Do
+        x = 0
+        If FileExists(y) = True Then
+            x = FileLen(y)
+            If x = 128 Then GotFile = True
+        End If
+    Loop Until x = 128 Or Timer >= Start + 300  '9/2/03:KBS upped from 60 to 300
+    
+    x = " You will need to look in PCCharge to review the results of this transaction." & vbCrLf & vbCrLf
+    x = x & "If the transaction was successfully processed (captured) in PCCharge, then you should enter the payment"
+    x = x & " in Order Manager by clicking on the Log Payment Received button found on the Pricing tab -"
+    x = x & " DO NOT re-transmit the charge in the Credit Card Terminal." & vbCrLf & vbCrLf
+    x = x & "If PCCharge reports a timeout or decline for the transaction"
+    x = x & " then you can re-transmit the charge at the Credit Card Terminal."
+    msg = x
+    
+    If Not GotFile Then
+        '9/2/03:KBS
+        'x = "ERROR: No response received from PCCharge, cannot continue."
+        x = "ORDER MANAGER TIMEOUT ERROR!!" & vbCrLf
+        x = x & "Order Manager did not receive a response from PCCharge!"
+        x = x & msg
+        y = "No PCCharge Response File Found for order " & ccOrder & " - Transaction Aborted."
+        If Notes > "" Then Notes = Notes & "; "
+        Notes = Notes & y
+        GoTo DOErr
+    End If
+    
+    'Wait for .pro file to be deleted
+    x = PCLoc & PCUser & ".pro"
+    Do
+        If Not FileExists(x) Then Exit Do
+    Loop
+    
+    ccResponse = ReadTextFileIntoString(y)
+    
+    Kill y
+    
+    '9/2/03:KBS
+    'If ccResponse & "" > "" Then PCChargeParse
+    If ccResponse & "" > "" Then
+        x = PCChargeParse
+        
+        '1/13/04: PCCharge not returning ticket # for other types
+        '2/17/04: added ()'s
+        If (ccTransType = "S" Or ccTransType = "A") And Not POS Then
+            '11/21/03:KBS added false test to report transaction errors before the order number test
+            If x = False Then
+                y = "PCCharge Error:" & ccRESPMSG
+                x = "PCCharge Processing Error: " & ccRESPMSG
+                If Notes > "" Then Notes = Notes & "; "
+                Notes = Notes & y
+                GoTo DOErr
+            ElseIf CLng(x) <> ccOrder Then
+                y = "PCCharge Response file was for order #" & x & " rather than current order #" & ccOrder & " - transaction aborted."
+                x = "PCCHARGE RESPONSE ERROR!!" & vbCrLf & "Order Manager received a response from PCCharge for order #" & x
+                x = x & " rather than the current order #" & ccOrder & "! This transaction will NOT be processed!!"
+                x = x & msg
+                If Notes > "" Then Notes = Notes & "; "
+                Notes = Notes & y
+                GoTo DOErr
+            End If
+        End If
+        
+    End If
+    If ccResult = 1 Then PCChargeSend = True
+    
+    If Not Silent Then SysCmd acSysCmdClearStatus
+    
+    If Notes > "" Then GoSub AddNotes
+    
+    Exit Function
+    
+AddData:
+    Data = Data & x
+    cnt = Len(x)
+    If cnt < y Then
+        Do
+            Data = Data & " "
+            cnt = cnt + 1
+        Loop Until cnt = y
+    End If
+    Return
+
+AddNotes:
+    If GetOrder(db, rs, ccOrder) Then
+        rs.Edit
+            If rs!Notes & "" > "" Then rs!Notes = rs!Notes & vbCrLf & vbCrLf
+            rs!Notes = rs!Notes & Date & ": While Processing Transaction - " & Notes
+        rs.Update
+        rs.Close
+        db.Close
+    End If
+    Return
+    
+DOErr:
+    Beep
+    MsgBox x
+    
+    '9/2/03:KBS
+    Set rs = MyDB.OpenRecordset("ErrorLog")
+    With rs
+        .AddNew
+            !When = Now
+            !Where = "PCChargeSend"
+            !what = "0000"
+            !Details = y
+        .Update
+        .Close
+    End With
+    If Notes > "" Then GoSub AddNotes
+    
+    PCChargeSend = "ProcessError"
+    
+End Function
+
+Public Function PCChargeParse()
+    
+    '9/2/03:KBS - PCChargeParse must return the Order Manager Order number from the response file
+    
+    Dim x, RefNum$, TransID$
+    
+    Do Until Len(ccResponse) = 128
+        ccResponse = ccResponse & " "
+    Loop
+    
+    ccBadAVS = False
+    ccBadCVV2 = False
+    
+    x = Trim(Mid$(ccResponse, 1, 21))
+    ccRESPMSG = x
+    Select Case x
+        Case "Captured", "Approved", "Voided", "Processed": x = 1
+        Case Else: x = 0
+    End Select
+    ccResult = x
+    If x = 0 Then
+        ccRESPMSG = ccRESPMSG & " - " & Trim(Mid$(ccResponse, 22, 16))
+    Else
+        ccAuthCode = Trim(Mid$(ccResponse, 22, 16))
+    End If
+    
+    '9/2/03:KBS
+    x = Trim(Mid$(ccResponse, 60, 10))
+    If x > "" Then PCChargeParse = x Else PCChargeParse = False
+    
+    ccAVSCode = Trim(Mid$(ccResponse, 54, 2))
+    ccTransDate = Trim(Mid$(ccResponse, 56, 4)) & Format(Date, "YYYY")
+    TransID = Trim(Mid$(ccResponse, 84, 15))
+    ccCVV2 = Trim(Mid$(ccResponse, 127, 1))
+    ccPNREF = Trim(Mid$(ccResponse, 70, 10))
+    
+    If ccResult = 0 And ccCVV2 & "" > "" And ccCVV2 <> "M" Then
+        ccBadCVV2 = True
+        ccRESPMSG = ccRESPMSG & " Bad CVV2 response."
+    ElseIf ccResult = 0 And InStr("CEGINPRSUWZ0", ccAVSCode) > 0 And ccAVSCode & "" > "" Then   '11/25/03:KBS
+        ccBadAVS = True
+        ccRESPMSG = ccRESPMSG & " Bad AVS response."
+    End If
+    
+End Function
+
+Public Function GetPCChargeProcessorCode(Which)
+    
+    Dim x$, y%, z%
+    
+    x = ""
+    y = InStr(Which, "(")
+    If y > 0 Then
+        z = InStr(Which, ")")
+        If z > 0 Then x = Mid$(Which, y + 1, z - y - 1)
+    End If
+        
+    GetPCChargeProcessorCode = x
+    
+End Function
+Sub VerisignParse()
+
+    'string to parse should be in CCResponse
+    'example response: RESULT=0&PNREF=V53A05522856&RESPMSG=Approved&AUTHCODE=359PNI&AVSADDR=X&AVSZIP=X
+    ccBadAVS = False
+    ccBadCVV2 = False
+    
+    ccResult = CCParse("RESULT")
+    ccPNREF = CCParse("PNREF")
+    ccRESPMSG = CCParse("RESPMSG")
+    ccAuthCode = CCParse("AUTHCODE")
+    ccAVSAddr = CCParse("AVSADDR")
+    ccAVSZip = CCParse("AVSZIP")
+    ccAVSCode = ccAVSAddr & ccAVSZip
+
+    '2/4/03
+    ccCVV2 = CCParse("CVV2MATCH")
+    
+    '7/7/03:KBS
+    If ccResult <> 0 Then
+        If ccResult = 112 Then
+            ccBadAVS = True
+        ElseIf ccResult = 114 Then
+            ccBadCVV2 = True
+        End If
+    End If
+    
+End Sub
+Function VerisignSend(Silent)
+
+    Dim x, f%, q$, SendPath$, ReturnPath$, OK%, i As Long, TestMode%
+    Dim User$, Password$, Vendor$, Partner$, CertPath$, PgmPath$
+    
+    q = Chr$(34)
+
+    User = GetParm("VerisignUser")
+    Password = GetParm("VerisignPassword")
+    Partner = GetParm("VerisignPartner")
+    Vendor = GetParm("VerisignVendor")
+    TestMode = GetParm("VerisignTestMode")
+    
+    VerisignSend = False
+    
+    If User = "" Or Password = "" Or Vendor = "" Or Partner = "" Then
+        Beep
+        MsgBox "Verisign parameters not set - can't send request!"
+        VerisignSend = "ProcessError"
+        Exit Function
+    End If
+    
+    PgmPath = GetIniParm("VerisignProgramPath") & ""
+    
+    '8/22/03
+    If PgmPath = "" Then
+        x = "C:\Program Files\VeriSign\Verisign\payflowpro\win32\bin\pfpro.exe"
+        If FileExists(x) Then
+            PgmPath = x
+        Else
+            x = "C:\payflowpro\win32\bin\pfpro.exe"
+            If FileExists(x) Then
+                PgmPath = x
+            Else
+                x = "c:\Windows\system32\pfpro.exe"
+                If FileExists(x) Then
+                    PgmPath = x
+                End If
+            End If
+        End If
+    End If
+    
+    If PgmPath > "" Then If FileExists(PgmPath) = False Then PgmPath = ""
+    
+    If PgmPath = "" Then
+        PgmPath = FindFile("pfpro.exe") & ""
+        If PgmPath = "" Then
+            Beep
+            MsgBox "Can't find pfpro.exe - can't send request to Verisign!"
+            VerisignSend = "ProcessError"
+            Exit Function
+        Else
+            SetIniParm "VerisignProgramPath", PgmPath
+        End If
+    End If
+    
+    CertPath = GetIniParm("VerisignCertPath") & ""
+    If CertPath > "" Then If FileExists(CertPath) = False Then CertPath = ""
+    
+    If CertPath = "" Then
+        'look in standard location based on .exe location:
+        x = FileLocation(PgmPath)
+        If Right$(x, 1) <> "\" Then x = x & "\"
+        If Right$(x, 4) = "bin\" Then x = Left$(x, Len(x) - 4)
+        x = x & "Certs\"
+        If FileExists(x) Then
+            CertPath = x
+        Else
+            x = OpenWhichFile("Locate Verisign CERTS directory", , , , FileLocation(PgmPath), , , True)
+            If x = "" Then
+                Beep
+                MsgBox "CERTS directory not located - can't send request to Verisign!"
+                VerisignSend = "ProcessError"
+                Exit Function
+            End If
+            CertPath = x
+        End If
+        SetIniParm "VerisignCertPath", CertPath
+    End If
+    
+    'just in case:
+    CreateNewDirectory "c:\temp"
+    DoEvents
+    
+    SendPath = "c:\temp\TempOMVSSend.bat"
+    ReturnPath = "c:\temp\TempOMVSReturn.txt"
+    
+    x = "@echo off" & vbCrLf
+    x = x & "set PFPRO_CERT_PATH=" & ShortFileName(CertPath) & vbCrLf
+    x = x & ShortFileName(PgmPath)
+    
+    If TestMode Then
+        x = x & " test-payflow.verisign.com 443 "
+    Else
+        x = x & " payflow.verisign.com 443 "
+    End If
+    
+    x = x & q & "TRXTYPE=" & ccTransType        'Sale, Credit, Auth, Delayed Capture, F(Voice auth), Void
+    x = x & "&TENDER=C"
+    x = x & "&PWD=" & Password
+    x = x & "&USER=" & User
+    x = x & "&VENDOR=" & Vendor
+    x = x & "&PARTNER=" & Partner
+    
+    'ccAuthCode = AuthCode          'only send if there is a Voice Authorization
+    
+    If ccTransType = "D" Or ccTransType = "V" Then
+        x = x & "&ORIGID=" & ccOrigID
+    '9/10/2020: allow credits to work both ways:
+    ElseIf ccTransType = "C" And ccOrigID & "" > "" Then
+        x = x & "&ORIGID=" & ccOrigID
+    Else
+        x = x & "&ACCT=" & ccAcctNum
+        x = x & "&EXPDATE=" & ccExpDate
+        x = x & "&INVNUM=" & ccOrder
+        'include length parameter in case & or = is present in field:
+        x = x & "&STREET[" & Len(ccAddr) & "]=" & ccAddr
+        x = x & "&ZIP=" & ccZip
+        '10/2/2020:
+        x = x & "&NAME=" & Trim$(ccFirstName & " " & ccLastName)
+        x = x & "&EMAIL=" & ccEmail
+        '2/4/03
+        If ccCVV2 > "" And GetParm("VerisignSendCVV2") = True Then x = x & "&CVV2=" & ccCVV2
+    End If
+    
+    x = x & "&AMT=" & Format$(ccAmt, "0.00")
+    x = x & q
+    x = x & " 30 >" & ReturnPath
+    
+    x = x & vbCrLf
+    x = x & "Echo" & vbCrLf
+
+    f = FreeFile
+    Open SendPath For Output As #f
+    Print #f, x
+    Close
+    
+    If FileExists(ReturnPath) Then
+        Kill ReturnPath
+        DoEvents
+    End If
+    
+    If Not Silent Then SysCmd acSysCmdSetStatus, "Sending request to Verisign ..."
+    
+    Shell SendPath, vbHide
+    DoEvents
+    
+    '7/30/02:
+    ccCVV2 = ""
+    
+    i = Timer: OK = False
+    Do
+        DoEvents
+        If FileExists(ReturnPath) Then OK = True: Exit Do
+        DoEvents
+    Loop Until Timer > i + 40
+        
+    If OK Then
+        'wait for file to be available:
+        i = Timer: OK = False
+        Do
+            DoEvents
+            x = ReadTextFileIntoString(ReturnPath)
+            If x > "" Then OK = True: Exit Do
+            DoEvents
+        Loop Until Timer > i + 40
+    End If
+    
+    If Not Silent Then SysCmd acSysCmdClearStatus
+    
+    If OK Then
+        ccResponse = x
+        VerisignParse
+        If ccResult = 0 Then VerisignSend = True
+        
+'Debug.Print "Received:"
+'Debug.Print x
+        
+    Else
+        ccResponse = "No response received from PayFlo Pro!"
+    End If
+        
+End Function
+
+
+Function AuthNetSend(Silent)
+
+    '7/2/02: changed AuthNet version to 3.1; added CVV2 support
+    '9/18/02: need FN,LN,Company,City,State,Country,Phone,Fax & Email; include with all transactions
+    
+    Dim Server$, Page$, Data$, URL$, y$, z$, Port
+    Dim x, f%, q$, SendPath$, ReturnPath$, OK%, ftype$, TestMode%, User$, Password$
+    
+    q = Chr$(34)
+
+    '2/26/02 - moved here to avoid conflict with Verisign
+    ccOrigID = JustNumerals(ccOrigID)
+    
+    User = GetParm("AuthNetUser")
+    Password = GetParm("AuthNetPassword")
+    TestMode = GetParm("AuthNetTestMode")
+    
+    AuthNetSend = False
+    
+    If User = "" Or Password = "" Then
+        Beep
+        MsgBox "Authorize.Net parameters not set - can't send request!"
+        AuthNetSend = "ProcessError"
+        Exit Function
+    End If
+    
+    Data = "x_Version=3.1"
+    Data = Data & "&x_ADC_Delim_Data=TRUE"
+    Data = Data & "&x_ADC_URL=FALSE"
+    If TestMode Then Data = Data & "&x_Test_Request=TRUE"
+    
+    Data = Data & "&x_Login=" & User
+    Data = Data & "&x_Password=" & Password
+    Data = Data & "&x_Amount=" & Format$(ccAmt, "0.00")
+    
+    '5/14/03:KBS added to support Yahoo pre-auth captures in OM
+    If ccOrigID & "" = "" And ccTransType = "D" Then ccTransType = "F"
+    
+    Select Case ccTransType
+        Case "S": x = "AUTH_CAPTURE": z = "Charge"                      'Sale
+        Case "C": x = "CREDIT": z = "Credit"                            'Credit
+        Case "A": x = "AUTH_ONLY": z = "Pre-Authorization"              'Auth
+        Case "D": x = "PRIOR_AUTH_CAPTURE": z = "Delayed Capture"       'Delayed_Capture of regular auth
+        
+        '3/25/03: remove comma
+        'Case "F": x = "CAPTURE_ONLY": z = "Capture w/Voice Auth, etc."  'Delayed capture of Voice auth, etc.
+        'Case "F": x = "CAPTURE_ONLY": z = "Capture w/Voice Auth etc."  'Delayed capture of Voice auth, etc.
+        Case "F": x = "CAPTURE_ONLY": z = "Capture w/AuthCode only."  'Delayed capture of Voice auth, etc.   '5/14/03:KBS
+        
+        Case "V": x = "VOID": z = "Void"                                'Void
+        Case Else: Stop
+    End Select
+    Data = Data & "&x_Type=" & x
+    
+    If ccTransType = "D" Then                                   'Delayed Capture
+        Data = Data & "&x_Trans_ID=" & ccOrigID
+    ElseIf ccTransType = "V" Then                               'Void
+        Data = Data & "&x_Trans_ID=" & ccOrigID
+    ElseIf ccTransType = "C" And ccOrigID & "" > "" Then        'Credit
+        Data = Data & "&x_Trans_ID=" & ccOrigID
+        Data = Data & "&x_Card_Num=" & ccAcctNum
+        Data = Data & "&x_Exp_Date=" & ccExpDate
+    ElseIf ccTransType = "F" And ccAuthCode & "" > "" Then        'Capture using authcode only, no orig id from yahoo 5/14/03:KBS
+        Data = Data & "&x_Auth_Code=" & ccAuthCode
+        Data = Data & "&x_Card_Num=" & ccAcctNum
+        Data = Data & "&x_Exp_Date=" & ccExpDate
+    Else                                                        'Sale or Auth
+        Data = Data & "&x_Card_Num=" & ccAcctNum
+        Data = Data & "&x_Exp_Date=" & ccExpDate
+        x = GetParm("AuthNetSendEmail")
+        If x = True Then x = "TRUE" Else x = "FALSE"
+        Data = Data & "&x_Email_Customer=" & x
+        If ccCVV2 > "" Then Data = Data & "&x_Card_Code=" & ccCVV2
+    End If
+    
+    '3/25/03: get rid of comma
+    'Data = Data & "&x_Description=" & z & ", Order #" & ccOrder
+    Data = Data & "&x_Description=" & z & " - Order #" & ccOrder
+    
+    Data = Data & "&x_Invoice_Num=" & ccOrder
+    
+    ftype = "T"
+    x = ccCustomer: y = "Cust_ID": GoSub FormatData
+    x = ccFirstName: y = "First_Name": GoSub FormatData
+    x = ccLastName: y = "Last_Name": GoSub FormatData
+    x = ccCompany: y = "Company": GoSub FormatData
+    
+    '9/20/02:
+    If ccCompany & "" > "" Then
+        Data = Data & "&x_Customer_Organization_Type=B"
+    Else
+        Data = Data & "&x_Customer_Organization_Type=I"
+    End If
+    
+    x = ccAddr: y = "Address": GoSub FormatData
+    x = ccCity: y = "City": GoSub FormatData
+    x = ccState: y = "State": GoSub FormatData
+    x = ccZip: y = "Zip": GoSub FormatData
+    x = ccCountry: y = "Country": GoSub FormatData
+    
+    ftype = "E"
+    x = ccEmail: y = "email": GoSub FormatData
+    
+    ftype = "P"
+    x = ccPhone: y = "phone": GoSub FormatData
+    x = ccFax: y = "fax": GoSub FormatData
+
+    URL$ = "https://secure.authorize.net/gateway/transact.dll"
+    SplitAddr URL, Server, Page, Port
+    
+    If Not Silent Then SysCmd acSysCmdSetStatus, "Sending request to Authorize.Net ..."
+    x = HTMLPost(Server, Page, Data, True, Silent, , , "AuthNet Send")
+    If Not Silent Then SysCmd acSysCmdClearStatus
+    
+    '7/30/02:
+    ccCVV2 = ""
+    
+    ccResponse = x
+    
+    '9/25/03
+    If x = "NoNET" Or x = "ProcessError" Then AuthNetSend = x: Exit Function
+    
+    AuthNetParse
+    If val(ccResult) = 1 Then
+        AuthNetSend = True
+    ElseIf y = "NoNET" Then
+        AuthNetSend = y
+    End If
+            
+    Exit Function
+    
+FormatData:
+
+    '11/8/02
+    If Not IsMissing(x) Then
+        If x = "" Then
+            Select Case ftype
+                Case "P": x = "000 000 0000"
+                '9/20/02
+                Case "E": x = GetParm("WellsFargoDefaultEmail") & ""
+                Case Else: x = "n/a"
+            End Select
+        End If
+        Data = Data & "&x_" & y & "=" & x
+    End If
+    Return
+    
+End Function
+
+
+Public Sub BuildAVS(Processor$)
+
+    Dim x$, y%, z$
+    'Take the ccAVSCode field and parse the response to return a Y/N character
+    'in first position for Address and a Y/N character in second position for Zip
+    'If both are good then put YY back into the ccAVSCode field
+    Select Case Processor
+        Case "USAEPay"
+            y = InStr(ccAVSCode, "Address: Match")
+            If y > 0 Then
+                x = "Y"
+            Else
+                y = InStr(ccAVSCode, "Address: No Match")
+                If y > 0 Then x = "N" Else x = "U"
+            End If
+            y = InStr(ccAVSCode, "5 Digit Zip: Match")
+            If y > 0 Then
+                x = x & "Y"
+            Else
+                y = InStr(ccAVSCode, "5 Digit Zip: No Match")
+                If y > 0 Then x = x & "N" Else x = x & "U"
+            End If
+            ccAVSCode = x
+            
+    End Select
+    
+End Sub
+
+Function YahooCCParse(CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2)
+
+    Dim i%, Processor$
+    
+    AVS = ParseField(CCInfo, "AVS")
+    AuthCode = ParseField(CCInfo, "AUTH")
+    
+    i = 0
+    Processor = GetParm("CreditCardProcessor")
+    If Processor > "" Then
+        If AuthCode > "" Then
+            i = 1
+            
+            '11/7/03
+            'If GetParm("WebTransactionType") <> "Pre-Authorize" Then CCStatus = 2
+            If GetParm("WebTransactionType") <> "Pre-Authorize" Then i = 2
+            
+        End If
+    End If
+    
+    CCStatus = i
+    
+End Function
+
+Function GenericCCParse(CCInfo, CCRef, AVS, AuthCode, CCStatus, CVV2)
+
+    Dim i%, Processor$
+    
+    CCRef = ParseField(CCInfo, "ID")
+    AVS = ParseField(CCInfo, "AVS")
+    AuthCode = ParseField(CCInfo, "AUTH")
+    
+    i = 0
+    If CCRef > "" Then i = 1
+    
+    '4/18/03
+    'If AuthCode > "" Then i = 2
+    
+    '10/6/03:KBS changed to always look at WebTransType parm regardless of gateway used
+    'Processor = GetParm("CreditCardProcessor")
+    'If Processor = "AuthorizeNet" Then
+        If GetParm("WebTransactionType") <> "Pre-Authorize" And AuthCode > "" Then i = 2
+    'Else
+    '    If AuthCode > "" Then i = 2
+    'End If
+    
+    CCStatus = i
+
+End Function
+Function VerisignSendNew(Silent)
+
+    Dim x, y, f%, q$, SendPath$, ReturnPath$, OK%, i&, TestMode%, SendCVV%, DoE%
+    Dim User$, Password$, Vendor$, Partner$, CertPath$, PgmPath$, PathArr(1 To 5)
+    Dim VSGuid$, HeadArr(1 To 8), ReqID$, URL, Server$, Page$, Port, BadCnt%
+    
+    q = Chr$(34)
+    DoE = False
+    
+    If ccTransType = "E" Then ccTransType = "S": DoE = True
+    If ccTransType = "R" Then ccTransType = "V": DoE = True
+    
+    VSGuid = GetParm("VerisignPayflowGUID", "", "Text")
+    If VSGuid = "" Then
+        VSGuid = GetGUID
+        SetParm "VerisignPayflowGUID", VSGuid
+    End If
+    
+    User = GetParm("VerisignUser")
+    Password = GetParm("VerisignPassword")
+    Partner = GetParm("VerisignPartner")
+    Vendor = GetParm("VerisignVendor")
+    TestMode = GetParm("VerisignTestMode")
+    SendCVV = GetParm("VerisignSendCVV2")
+    
+    VerisignSendNew = False
+
+    If ccTransType = "D" And ccOrigID & "" = "" Then ccTransType = "F"
+    
+    If User = "" Or Password = "" Or Vendor = "" Or Partner = "" Then
+        Beep
+        MsgBox "Verisign PayflowPro parameters not set - can't send request!"
+        VerisignSendNew = "ProcessError"
+        Exit Function
+    End If
+    
+    If VSGuid = "" Then
+        Beep
+        MsgBox "Could not generate VerisignPayflowGUID - can't send request!"
+        VerisignSendNew = "ProcessError"
+        Exit Function
+    End If
+    
+    GoSub SetKey
+    
+    If Len(ReqID) <> 32 Then
+        Beep
+        MsgBox "Could not generate Verisign Payflow Request ID - can't send request!"
+        VerisignSendNew = "ProcessError"
+        Exit Function
+    End If
+        
+    If TestMode Then
+        URL = "pilot-payflowpro.paypal.com/transaction"
+    Else
+        URL = "payflowpro.paypal.com/transaction"
+    End If
+    
+    SplitAddr URL, Server, Page, Port
+    
+    x = "TRXTYPE=" & ccTransType        'Sale, Credit, Auth, Delayed Capture, F(Voice auth), Void
+
+    If DoE Then
+        x = x & "&TENDER=K"
+    Else
+        x = x & "&TENDER=C"
+    End If
+    x = x & "&PWD=" & Password
+    x = x & "&USER=" & User
+    x = x & "&VENDOR=" & Vendor
+    x = x & "&PARTNER=" & Partner
+
+    If DoE Then
+'        If ccTransType = "V" Then x = x & "&ORIGID=" & ccOrigID
+'        x = x & "&CHKNUM=" & ccAcctNum
+'        If InStr(ecTransType, "business") > 0 Then
+'            x = x & "&CHKTYPE=C"
+'            x = x & "&SS=" & ecIDNumber
+'        Else
+'            x = x & "&CHKTYPE=P"
+'            x = x & "&DL=" & ecIDState & ecIDNumber
+'        End If
+'
+'        x = x & "&EMAIL=" & ccEmail
+'        x = x & "&INVNUM=" & ccOrder
+'        x = x & "&MICR=" & ecRouting & ccAcctNum & ecCheckNum
+'        y = Trim$(ccFirstName & " " & ccLastName)
+'        x = x & "&NAME[" & Len(y) & "]=" & y
+'        x = x & "&STATE=" & ccState
+'        x = x & "&STREET[" & Len(ccAddr) & "]=" & ccAddr
+'        x = x & "&ZIP=" & ccZip
+'
+    ElseIf ccTransType = "D" Or ccTransType = "V" Then
+        x = x & "&ORIGID=" & ccOrigID
+    'allow credits to work both ways
+    ElseIf ccTransType = "C" And ccOrigID & "" > "" Then
+        x = x & "&ORIGID=" & ccOrigID
+    Else
+        If ccTransType = "F" Then x = x & "&AUTHCODE=" & ccAuthCode
+        x = x & "&ACCT=" & ccAcctNum
+        x = x & "&EXPDATE=" & ccExpDate
+        x = x & "&INVNUM=" & ccOrder
+        'include length parameter in case & or = is present in field
+        x = x & "&STREET[" & Len(ccAddr) & "]=" & ccAddr
+        x = x & "&ZIP=" & ccZip
+        y = Trim$(ccFirstName & " " & ccLastName)
+        x = x & "&NAME[" & Len(y) & "]=" & y
+        x = x & "&EMAIL=" & ccEmail
+        If ccCVV2 > "" And SendCVV Then x = x & "&CVV2=" & ccCVV2
+        
+        If CardRead Then
+            If Track1Data & "" > "" Then
+                x = x & "&SWIPE[" & Len(Track1Data) & "]=" & Track1Data
+            ElseIf Track2Data & "" > "" Then
+                x = x & "&SWIPE[" & Len(Track2Data) & "]=" & Track2Data
+            End If
+        End If
+    End If
+    
+    x = x & "&AMT=" & Format$(Abs(Nz(ccAmt, 0)), "0.00")
+    
+    ccCVV2 = ""
+    
+    BadCnt = 0
+    
+TryAgain:
+    
+    HeadArr(1) = "Content-Type: text/namevalue"
+    HeadArr(2) = "Content-Length: " & Len(x)
+    HeadArr(3) = "Host: " & URL
+    HeadArr(4) = "X-VPS-REQUEST-ID: " & ReqID
+    HeadArr(5) = "X-VPS-CLIENTTIMEOUT: 60"
+    HeadArr(6) = "X-VPS-VITCLIENTCERTIFICATION-ID: " & ReplaceText(VSGuid, "-", "")
+    HeadArr(7) = "X-VPS-VITINTEGRATION-Product: Stone_Edge_Order_Manager"
+    If RevNum > "" Then
+        HeadArr(8) = "X-VPS-VITINTEGRATION-Version: " & RevNum
+    Else
+        HeadArr(8) = ""
+    End If
+    
+    If Not Silent Then SysCmd acSysCmdSetStatus, "Sending request to Verisign ..."
+    
+    y = HTMLPost(Server, Page, x, True, , , , "VerisignSendNew", , , , HeadArr)
+    
+    If Not Silent Then SysCmd acSysCmdClearStatus
+    
+    If y = "NONET" Then
+        VerisignSendNew = y
+    Else
+        ccResponse = y
+        '2/14/08:KBS
+        If InStr(y, "Duplicate=1") > 0 Then
+            
+            'Duplicate transaction - the RefID number was used in a previous transaction
+            'call for new GUID and try again... attempt this 10 times then error out if unsuccessful.
+            
+            BadCnt = BadCnt + 1
+            If BadCnt > 10 Then
+                x = "The Order Manager cannot process this transaction!" & vbCrLf & vbCrLf
+                x = x & "The Order Manager attempted to send the transaction 10 times but"
+                x = x & " in each case the response from PayPal is showing"
+                x = x & " a result that is a duplicate of an older transaction." & vbCrLf & vbCrLf
+                x = x & "Please Contact Stone Edge Technologies, Inc. for support at 610-994-3699"
+                Beep
+                MsgBox x, vbCritical + vbOKOnly, "Critical Error!"
+                VerisignSendNew = "ProcessError"
+                ccRESPMSG = "ProcessError"
+            Else
+                GoSub SetKey
+                GoTo TryAgain
+            End If
+        Else
+            VerisignParse
+            If ccResult = 0 Then VerisignSendNew = True
+        End If
+    End If
+    
+    Exit Function
+    
+SetKey:
+    ReqID = JustNumerals(GetGUID, True)
+    ccSecurityKey = ReqID
+    Return
+    
+End Function
+
+Public Function GetGUID() As String
+    
+    '(c) 2000 Gus Molina
+
+    Dim udtGUID As GUID
+    
+    If (CoCreateGuid(udtGUID) = 0) Then
+    
+        GetGUID = _
+        String(8 - Len(Hex$(udtGUID.Data1)), "0") & Hex$(udtGUID.Data1) & "-" & _
+        String(4 - Len(Hex$(udtGUID.Data2)), "0") & Hex$(udtGUID.Data2) & "-" & _
+        String(4 - Len(Hex$(udtGUID.Data3)), "0") & Hex$(udtGUID.Data3) & "-" & _
+        IIf((udtGUID.Data4(0) < &H10), "0", "") & Hex$(udtGUID.Data4(0)) & _
+        IIf((udtGUID.Data4(1) < &H10), "0", "") & Hex$(udtGUID.Data4(1)) & "-" & _
+        IIf((udtGUID.Data4(2) < &H10), "0", "") & Hex$(udtGUID.Data4(2)) & _
+        IIf((udtGUID.Data4(3) < &H10), "0", "") & Hex$(udtGUID.Data4(3)) & _
+        IIf((udtGUID.Data4(4) < &H10), "0", "") & Hex$(udtGUID.Data4(4)) & _
+        IIf((udtGUID.Data4(5) < &H10), "0", "") & Hex$(udtGUID.Data4(5)) & _
+        IIf((udtGUID.Data4(6) < &H10), "0", "") & Hex$(udtGUID.Data4(6)) & _
+        IIf((udtGUID.Data4(7) < &H10), "0", "") & Hex$(udtGUID.Data4(7))
+    
+    End If
+
+End Function
+
+
+
+
